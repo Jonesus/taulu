@@ -13,7 +13,7 @@
 // Configuration constants
 // Production server (Raspberry Pi)
 #ifndef SERVER_HOST
-#define SERVER_HOST "serverpi.local:3000"
+#define SERVER_HOST "192.168.1.124:3000"
 #endif
 
 #define DEFAULT_SLEEP_TIME 3600000000ULL // 1 hour
@@ -246,9 +246,6 @@ void setup() {
         powerDownDisplay();
     }
 
-    // Power down radios
-    teardownRadios();
-
     // Get sleep interval from server (with fallback to default)
     uint64_t sleepInterval = getSleepDurationFromServer();
     if (sleepInterval == 0) {
@@ -265,6 +262,9 @@ void setup() {
     // Report going to sleep
     reportDeviceStatus("sleeping", batteryVoltage, signalStrength, batteryPercent, isCharging);
     sendLogToServer("Entering deep sleep");
+
+    // Power down radios before sleep
+    teardownRadios();
 
     // Enter deep sleep with clock-aligned duration
     enterDeepSleep(alignedSleepDuration);
@@ -541,7 +541,8 @@ void generateAndDisplayBhutanFlag() {
     
     // Try to download the actual Bhutan flag from server first
     HTTPClient http;
-    http.begin("http://serverpi.local:3000/api/bhutan.bin");
+    String url = buildApiUrl("bhutan.bin", SERVER_HOST);
+    http.begin(url);
     http.setTimeout(30000);
     http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
     

@@ -9,7 +9,7 @@
  */
 
 #ifndef SERVER_URL
-#define SERVER_BASE    "http://serverpi.local"  // Port 80 (default HTTP)
+#define SERVER_BASE    "http://192.168.1.124:3000"  // Port 3000 (mock server)
 #else
 #define SERVER_BASE    SERVER_URL
 #endif

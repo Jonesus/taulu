@@ -26,7 +26,7 @@ const char* WIFI_PASSWORD = "YourPassword";
 const char* WIFI_PASSWORD = WIFI_PASSWORD;
 #endif
 
-const char* SERVER_URL = "http://serverpi.local:3000/api/image.bin";
+const char* SERVER_URL = "http://192.168.1.124:3000/api/image.bin";
 
 uint8_t* rgb_buffer = NULL;
 uint8_t* eink_buffer = NULL;
