@@ -85,10 +85,10 @@ jobs:
           DEVICE_ID: "esp32-ota"
           PLATFORMIO_BUILD_FLAGS: "-j4"
         run: |
-          pio run --environment huzzah32 --jobs 4
+          pio run --environment gooddisplay_esp32 --jobs 4
 
           # Get firmware info
-          FIRMWARE_PATH=".pio/build/huzzah32/firmware.bin"
+          FIRMWARE_PATH=".pio/build/gooddisplay_esp32/firmware.bin"
           FIRMWARE_SIZE=$(stat -c%s "$FIRMWARE_PATH")
           SHORT_SHA=${FIRMWARE_VERSION:0:7}
 
@@ -100,7 +100,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: firmware
-          path: esp32-client/.pio/build/huzzah32/firmware.bin
+          path: esp32-client/.pio/build/gooddisplay_esp32/firmware.bin
           retention-days: 7
 
   # Build Node.js server Docker image (runs in parallel with ESP32 build)
