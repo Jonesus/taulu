@@ -381,21 +381,11 @@ bool downloadImageToPSRAM() {
         einkBuffer = (uint8_t*)malloc(EINK_BUFFER_SIZE);
     }
 
-    // Allocate small RGB chunk buffer in regular heap
-    rgbChunk = (uint8_t*)malloc(CHUNK_SIZE);
-
-    if (!einkBuffer || !rgbChunk) {
-        Debug("ERROR: Cannot allocate streaming buffers!\r\n");
-        Debug("E-ink buffer: " + String(EINK_BUFFER_SIZE / 1024) + "KB needed\r\n");
-        Debug("Available PSRAM: " + String(ESP.getFreePsram() / 1024) + "KB\r\n");
-        sendLogToServer("ERROR: Memory allocation failed for image buffers", "ERROR");
-        if (einkBuffer) free(einkBuffer);
-        if (rgbChunk) free(rgbChunk);
+    if (!einkBuffer) {
+        Debug("ERROR: Cannot allocate e-ink buffer!\r\n");
+        sendLogToServer("ERROR: Memory allocation failed for e-ink buffer", "ERROR");
         return false;
     }
-
-    Debug("SUCCESS: Using streaming approach - e-ink buffer: " + String(EINK_BUFFER_SIZE / 1024) + "KB\r\n");
-    sendLogToServer("Memory allocated, downloading image (3.7MB)");
 
     // Download raw binary image data
     HTTPClient http;
@@ -421,7 +411,6 @@ bool downloadImageToPSRAM() {
         http.end();
         usedFallback = true;
 
-        // Retry with production server
         serverToUse = SERVER_HOST;
         url = buildApiUrl("image.bin", serverToUse);
         http.begin(url);
@@ -440,59 +429,94 @@ bool downloadImageToPSRAM() {
         } else {
             free(einkBuffer);
         }
-        free(rgbChunk);
         http.end();
         return false;
     }
     
-    // Stream and convert RGB data on-the-fly
+    int contentLength = http.getSize();
+    Debug("Content length: " + String(contentLength) + " bytes\r\n");
+
+    // Check if this is a packed E-ink binary (960KB) or RGB stream (5.7MB)
+    bool isPackedBinary = (contentLength == EINK_BUFFER_SIZE);
+
+    if (isPackedBinary) {
+        Debug("Detected PACKED E-INK binary (960KB). Downloading directly...\r\n");
+        sendLogToServer("Downloading packed e-ink binary directly");
+    } else {
+        Debug("Detected RGB stream. Allocating RGB chunk buffer...\r\n");
+        sendLogToServer("Downloading and converting RGB stream");
+        
+        rgbChunk = (uint8_t*)malloc(CHUNK_SIZE);
+        if (!rgbChunk) {
+            Debug("ERROR: Cannot allocate RGB chunk buffer!\r\n");
+            sendLogToServer("ERROR: RGB chunk allocation failed", "ERROR");
+            if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
+                heap_caps_free(einkBuffer);
+            } else {
+                free(einkBuffer);
+            }
+            http.end();
+            return false;
+        }
+    }
+    
+    // Stream data
     WiFiClient* stream = http.getStreamPtr();
     int totalBytesRead = 0;
     int pixelIndex = 0;
-    int contentLength = http.getSize();
-    Debug("Content length: " + String(contentLength) + " bytes (streaming RGB)\r\n");
     
     // Clear e-ink buffer
     memset(einkBuffer, 0, EINK_BUFFER_SIZE);
     
-    while (http.connected() && totalBytesRead < contentLength) {
+    while (http.connected() && (totalBytesRead < contentLength || contentLength == -1)) {
         size_t available = stream->available();
         if (available > 0) {
-            // Read chunk (ensure we read RGB triplets - multiple of 3)
-            int readSize = min((int)available, CHUNK_SIZE);
-            readSize = (readSize / 3) * 3; // Align to RGB triplets
-            if (readSize < 3) readSize = 3; // Minimum one RGB triplet
-            
-            int bytesRead = stream->readBytes(rgbChunk, readSize);
-            totalBytesRead += bytesRead;
-            
-            // Process RGB triplets in this chunk
-            for (int i = 0; i < bytesRead && pixelIndex < (DISPLAY_WIDTH * DISPLAY_HEIGHT); i += 3) {
-                if (i + 2 < bytesRead) { // Ensure we have full RGB triplet
-                    uint8_t r = rgbChunk[i];
-                    uint8_t g = rgbChunk[i + 1];
-                    uint8_t b = rgbChunk[i + 2];
-                    
-                    // Convert RGB/BGR to Spectra 6 color
-                    uint8_t einkColor = mapRGBToEink(r, g, b);
-                    
-                    // Pack into 4-bit format (2 pixels per byte)
-                    int einkByteIndex = pixelIndex / 2;
-                    bool isEvenPixel = (pixelIndex % 2) == 0;
-                    
-                    if (isEvenPixel) {
-                        einkBuffer[einkByteIndex] = (einkColor << 4);  // Upper nibble
-                    } else {
-                        einkBuffer[einkByteIndex] |= einkColor;        // Lower nibble
+            if (isPackedBinary) {
+                // DIRECT DOWNLOAD: Read bytes directly into einkBuffer
+                int remaining = EINK_BUFFER_SIZE - totalBytesRead;
+                int readSize = min((int)available, remaining);
+                
+                if (readSize > 0) {
+                    int bytesRead = stream->readBytes(einkBuffer + totalBytesRead, readSize);
+                    totalBytesRead += bytesRead;
+                } else {
+                    // Buffer full
+                    break;
+                }
+            } else {
+                // RGB CONVERSION: Read into chunk, convert, write to einkBuffer
+                int readSize = min((int)available, CHUNK_SIZE);
+                readSize = (readSize / 3) * 3; // Align to RGB triplets
+                if (readSize < 3) readSize = 3; 
+                
+                int bytesRead = stream->readBytes(rgbChunk, readSize);
+                totalBytesRead += bytesRead;
+                
+                // Process RGB triplets
+                for (int i = 0; i < bytesRead && pixelIndex < (DISPLAY_WIDTH * DISPLAY_HEIGHT); i += 3) {
+                    if (i + 2 < bytesRead) {
+                        uint8_t r = rgbChunk[i];
+                        uint8_t g = rgbChunk[i + 1];
+                        uint8_t b = rgbChunk[i + 2];
+                        uint8_t einkColor = mapRGBToEink(r, g, b);
+                        
+                        int einkByteIndex = pixelIndex / 2;
+                        bool isEvenPixel = (pixelIndex % 2) == 0;
+                        
+                        if (isEvenPixel) {
+                            einkBuffer[einkByteIndex] = (einkColor << 4);
+                        } else {
+                            einkBuffer[einkByteIndex] |= einkColor;
+                        }
+                        pixelIndex++;
                     }
-                    
-                    pixelIndex++;
                 }
             }
             
             // Progress indicator
-            if (totalBytesRead % 500000 == 0) {
-                Debug("Streamed: " + String(totalBytesRead / 1024) + "KB, pixels: " + String(pixelIndex / 1000) + "K\r\n");
+            if (totalBytesRead % 200000 == 0) {
+                Debug("Streamed: " + String(totalBytesRead / 1024) + "KB\r\n");
+                esp_task_wdt_reset();
             }
         } else {
             delay(10);
@@ -501,39 +525,45 @@ bool downloadImageToPSRAM() {
     }
     
     http.end();
-    Debug("Stream complete: " + String(totalBytesRead) + " bytes, " + String(pixelIndex) + " pixels\r\n");
+    Debug("Download complete. Total read: " + String(totalBytesRead) + " bytes\r\n");
     
-    // Display if we got most of the image
-    if (pixelIndex >= (DISPLAY_WIDTH * DISPLAY_HEIGHT * 0.9)) {
-        Debug("Displaying streamed image...\r\n");
+    // Validate download
+    bool success = false;
+    if (isPackedBinary) {
+        // For packed binary, we expect exactly 960KB
+        if (totalBytesRead >= EINK_BUFFER_SIZE) {
+            success = true;
+        }
+    } else {
+        // For RGB, we check pixel count
+        if (pixelIndex >= (DISPLAY_WIDTH * DISPLAY_HEIGHT * 0.9)) {
+            success = true;
+        }
+    }
+
+    if (success) {
+        Debug("Displaying image...\r\n");
         sendLogToServer("Rendering image to display (30-45s)");
 
-        // Small delay for Feather v2 power stabilization
         delay(2000);
         esp_task_wdt_reset();
 
         EPD_13IN3E_Display(einkBuffer);
-        Debug("SUCCESS: Streamed image displayed!\r\n");
-        sendLogToServer("Image successfully displayed on e-ink panel");
-        
-        // Clean up
-        if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
-            heap_caps_free(einkBuffer);
-        } else {
-            free(einkBuffer);
-        }
-        free(rgbChunk);
-        return true;
+        Debug("SUCCESS: Image displayed!\r\n");
+        sendLogToServer("Image successfully displayed");
     } else {
-        Debug("ERROR: Incomplete streaming download\r\n");
-        if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
-            heap_caps_free(einkBuffer);
-        } else {
-            free(einkBuffer);
-        }
-        free(rgbChunk);
-        return false;
+        Debug("ERROR: Incomplete download\r\n");
     }
+
+    // Cleanup
+    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
+        heap_caps_free(einkBuffer);
+    } else {
+        free(einkBuffer);
+    }
+    if (rgbChunk) free(rgbChunk);
+    
+    return success;
 }
 
 void generateAndDisplayBhutanFlag() {
