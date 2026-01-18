@@ -179,14 +179,8 @@ Glance/
 │   ├── HARDWARE.md        # Hardware documentation
 │   └── PROJECT_GOALS.md   # Project goals & roadmap
 │
-├── esp32-client/          # 🔧 ESP32 Firmware
-│   ├── gooddisplay-clean/ # Production firmware (Good Display board)
-│   │   ├── src/
-│   │   │   ├── main.c         # Main application with battery monitoring
-│   │   │   ├── ota.c/h        # OTA firmware update system
-│   │   │   ├── server_config.h # Shared server configuration
-│   │   │   └── GDEP133C02.c/h # E-ink display driver
-│   │   └── platformio.ini     # Build config with firmware version
+├── esp32-client/          # 🔧 ESP32 Firmware (Arduino)
+│   ├── src/main.cpp       # Main production firmware
 │   ├── lib/epd/           # E-ink display drivers
 │   └── build.sh           # Build & upload script
 │

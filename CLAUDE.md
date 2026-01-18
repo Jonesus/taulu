@@ -29,14 +29,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```
 Glance/
-├── esp32-client/                 # ESP32 firmware (PlatformIO/ESP-IDF)
-│   ├── gooddisplay-clean/        # Main production firmware
-│   │   ├── src/
-│   │   │   ├── main.c            # Core firmware with battery monitoring
-│   │   │   ├── ota.c             # OTA firmware update system
-│   │   │   ├── server_config.h   # Shared server URLs and config
-│   │   │   └── GDEP133C02.c      # E-ink display driver
-│   │   └── platformio.ini        # Build config with firmware version
+├── esp32-client/                 # ESP32 firmware (Arduino)
+│   ├── src/main.cpp              # Main production firmware
 │   ├── lib/epd/                  # E-ink display drivers
 │   └── build.sh                  # Build automation
 ├── server/                       # Node.js Express server (TypeScript)
@@ -122,14 +116,14 @@ No manual deployment needed for server or firmware changes.
 ### ESP32 Development
 
 ```bash
-cd esp32-client/gooddisplay-clean
+cd esp32-client
 
 # Set credentials (or use setup-env.sh)
 export WIFI_SSID="YourNetwork"
 export WIFI_PASSWORD="YourPassword"
 
 # Build and upload
-pio run --target upload --environment esp32s3
+pio run --target upload --environment huzzah32
 
 # Monitor serial output
 pio device monitor --baud 115200

@@ -36,21 +36,19 @@ The actual resistor values create a 4.7:1 divider ratio (calibrated from measure
 ### Code Location
 
 Battery monitoring is implemented in:
-- **File:** `esp32-client/gooddisplay-clean/src/main.c`
-- **Function:** `read_battery_voltage()` (lines 158-227)
+- **File:** `esp32-client/src/main.cpp`
+- **Function:** `readBatteryVoltage()`
 - **Features:**
-  - Median filtering (20 samples over 100ms)
-  - Sensor validation (variance check)
-  - Automatic invalid sensor detection
-  - Calibrated 4.7 voltage divider ratio
+  - Median filtering
+  - Charging detection
+  - Automatic low battery extended sleep
 
 ### Build and Monitor
 ```bash
-cd esp32-client/gooddisplay-clean
+cd esp32-client
 export WIFI_SSID="YourNetwork"
 export WIFI_PASSWORD="YourPassword"
-pio run --target upload --environment esp32s3
-pio device monitor --baud 115200
+./build.sh upload
 ```
 
 ---
@@ -88,7 +86,7 @@ LiPo Battery → Good Display ESP32-133C02 → Waveshare 13.3" E-ink
 
 ### Battery Reading Function
 
-The `read_battery_voltage()` function in [main.c:158-227](../esp32-client/gooddisplay-clean/src/main.c#L158-L227) implements:
+The `readBatteryVoltage()` function in [main.cpp](../esp32-client/src/main.cpp) implements:
 
 **Median Filtering:**
 ```c
@@ -117,7 +115,7 @@ float battery_voltage = adc_voltage * VOLTAGE_DIVIDER_RATIO;
 
 ### Battery Thresholds
 
-Defined in [main.c:82-85](../esp32-client/gooddisplay-clean/src/main.c#L82-L85):
+Defined in [main.cpp](../esp32-client/src/main.cpp):
 ```c
 #define BATTERY_CRITICAL 3.3f  // Critical battery level
 #define BATTERY_LOW      3.5f  // Low battery warning
@@ -127,7 +125,7 @@ Defined in [main.c:82-85](../esp32-client/gooddisplay-clean/src/main.c#L82-L85):
 
 ### Charging Detection
 
-Smart charging detection in [main.c:339-342](../esp32-client/gooddisplay-clean/src/main.c#L339-L342):
+Smart charging detection in [main.cpp](../esp32-client/src/main.cpp):
 ```c
 bool is_battery_charging(float voltage) {
     const float CHARGING_THRESHOLD = 4.0f;
@@ -145,7 +143,7 @@ ESP32 tracks brownout resets in NVS and enters recovery mode after 3 brownouts:
 - Sleeps for extended period (1 hour)
 - Allows battery to recover
 
-See [main.c:869-882](../esp32-client/gooddisplay-clean/src/main.c#L869-L882).
+See [main.cpp](../esp32-client/src/main.cpp).
 
 ---
 

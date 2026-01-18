@@ -5,7 +5,8 @@ on:
     branches: [ main, develop ]
     paths:
       - 'server/**'
-      - 'esp32-client/gooddisplay-clean/**'
+      - 'esp32-client/**'
+      - '!esp32-client/.pio/**'
       - 'docker-compose.yml'
       - '.github/workflows/test-and-build.yml'
   workflow_dispatch:
@@ -67,7 +68,7 @@ jobs:
           path: |
             ~/.platformio
             ~/.cache/pip
-          key: pio-${{ hashFiles('esp32-client/gooddisplay-clean/platformio.ini') }}
+          key: pio-${{ hashFiles('esp32-client/platformio.ini') }}
           restore-keys: |
             pio-
 
@@ -76,7 +77,7 @@ jobs:
 
       - name: Build ESP32 firmware
         id: build
-        working-directory: esp32-client/gooddisplay-clean
+        working-directory: esp32-client
         env:
           FIRMWARE_VERSION: ${{ github.sha }}
           WIFI_SSID: ${{ secrets.WIFI_SSID }}
@@ -84,10 +85,10 @@ jobs:
           DEVICE_ID: "esp32-ota"
           PLATFORMIO_BUILD_FLAGS: "-j4"
         run: |
-          pio run --environment esp32s3 --jobs 4
+          pio run --environment huzzah32 --jobs 4
 
           # Get firmware info
-          FIRMWARE_PATH=".pio/build/esp32s3/firmware.bin"
+          FIRMWARE_PATH=".pio/build/huzzah32/firmware.bin"
           FIRMWARE_SIZE=$(stat -c%s "$FIRMWARE_PATH")
           SHORT_SHA=${FIRMWARE_VERSION:0:7}
 
@@ -99,7 +100,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: firmware
-          path: esp32-client/gooddisplay-clean/.pio/build/esp32s3/firmware.bin
+          path: esp32-client/.pio/build/huzzah32/firmware.bin
           retention-days: 7
 
   # Build Node.js server Docker image (runs in parallel with ESP32 build)
