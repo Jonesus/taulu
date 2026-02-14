@@ -38,8 +38,7 @@ void teardownRadios();
 void powerDownDisplay();
 bool connectToWiFi();
 bool downloadAndDisplayImage();
-bool downloadImageToPSRAM();
-void generateAndDisplayBhutanFlag();
+bool downloadImageToPSRAM(bool displayNow = true, uint8_t** outBuffer = nullptr);
 void reportDeviceStatus(const char *status, float batteryVoltage, int signalStrength, int batteryPercent, bool isCharging);
 void sendLogToServer(const char *message, const char *level = "INFO");
 float readBatteryVoltage();
@@ -122,7 +121,6 @@ void setup() {
     if (!connectToWiFi()) {
         Debug("WiFi connection failed, displaying fallback flag\r\n");
         sendLogToServer("WiFi connection failed after 20 attempts", "ERROR");
-        generateAndDisplayBhutanFlag();
         enterDeepSleep(DEFAULT_SLEEP_TIME);
         return;
     }
@@ -193,6 +191,9 @@ void setup() {
     }
     http.end();
 
+    // Track if download failed for sleep duration adjustment
+    bool downloadFailed = false;
+
     // Only proceed with display update if we successfully fetched metadata and image changed
     if (!metadataFetched) {
         // Failed to fetch metadata - skip display update to save power
@@ -207,26 +208,48 @@ void setup() {
         Debug("Proceeding with display update\r\n");
         sendLogToServer("Starting display update for new image");
 
-        // Initialize e-Paper display
-        Debug("Initializing e-Paper display...\r\n");
-        sendLogToServer("Initializing e-Paper display hardware");
-        DEV_Module_Init();
-        delay(2000);
-        EPD_13IN3E_Init();
-        delay(2000);
+        // Download image to PSRAM first (before clearing display)
+        Debug("Downloading image to PSRAM...\r\n");
+        sendLogToServer("Downloading new image");
 
-        // Clear display with white background first
-        Debug("Clearing display...\r\n");
-        sendLogToServer("Clearing display (30-45s)");
-        EPD_13IN3E_Clear(EINK_WHITE);
-        Debug("Display cleared\r\n");
-        sendLogToServer("Display cleared, starting image download");
-        delay(1000);
+        uint8_t* imageBuffer = nullptr;
+        bool downloadSuccess = downloadImageToPSRAM(false, &imageBuffer);
 
-        // Download and display image from server
-        bool success = downloadAndDisplayImage();
+        if (downloadSuccess && imageBuffer != nullptr) {
+            // Download succeeded, now initialize and clear display
+            Debug("Download successful, initializing display...\r\n");
+            sendLogToServer("Download successful, initializing display");
 
-        if (success) {
+            DEV_Module_Init();
+            delay(2000);
+            EPD_13IN3E_Init();
+            delay(2000);
+
+            // Clear display with white background
+            Debug("Clearing display...\r\n");
+            sendLogToServer("Clearing display (30-45s)");
+            EPD_13IN3E_Clear(EINK_WHITE);
+            Debug("Display cleared\r\n");
+            sendLogToServer("Display cleared, rendering new image");
+            delay(1000);
+
+            // Display the downloaded image
+            Debug("Displaying downloaded image...\r\n");
+            sendLogToServer("Rendering image to display (30-45s)");
+            delay(2000);
+            esp_task_wdt_reset();
+
+            EPD_13IN3E_Display(imageBuffer);
+            Debug("SUCCESS: Image displayed!\r\n");
+            sendLogToServer("Image successfully displayed");
+
+            // Free the image buffer
+            if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
+                heap_caps_free(imageBuffer);
+            } else {
+                free(imageBuffer);
+            }
+
             // Store the new imageId in RTC memory
             if (currentImageId.length() > 0 && currentImageId.length() < 65) {
                 strncpy(lastDisplayedImageId, currentImageId.c_str(), 64);
@@ -235,29 +258,49 @@ void setup() {
             }
 
             reportDeviceStatus("display_updated", batteryVoltage, signalStrength, batteryPercent, isCharging);
-            sendLogToServer("Image downloaded and displayed successfully");
-        } else {
-            reportDeviceStatus("display_fallback", batteryVoltage, signalStrength, batteryPercent, isCharging);
-            sendLogToServer("Download failed, displaying fallback flag");
-            generateAndDisplayBhutanFlag();
-        }
 
-        // Power down display after update
-        powerDownDisplay();
+            // Power down display after update
+            powerDownDisplay();
+        } else {
+            // Download failed, keep previous image on display
+            Debug("Download failed, keeping previous image\r\n");
+            sendLogToServer("Download failed, keeping previous image on display", "ERROR");
+            reportDeviceStatus("download_failed", batteryVoltage, signalStrength, batteryPercent, isCharging);
+
+            // Do NOT clear display, do NOT show fallback
+            // Display is left untouched with previous image
+            downloadFailed = true;
+        }
     }
 
-    // Get sleep interval from server (with fallback to default)
-    uint64_t sleepInterval = getSleepDurationFromServer();
-    if (sleepInterval == 0) {
-        Debug("Using default sleep interval\r\n");
-        sleepInterval = DEFAULT_SLEEP_TIME;
+    // Get sleep interval - use short interval if download failed
+    uint64_t sleepInterval;
+    if (downloadFailed) {
+        // Use 15 minutes on download failure
+        sleepInterval = 15 * 60 * 1000000ULL; // 15 minutes in microseconds
+        Debug("Download failed, using short sleep interval: 15 minutes\r\n");
+        sendLogToServer("Using 15-minute sleep due to download failure");
+    } else {
+        // Get sleep interval from server (with fallback to default)
+        sleepInterval = getSleepDurationFromServer();
+        if (sleepInterval == 0) {
+            Debug("Using default sleep interval\r\n");
+            sleepInterval = DEFAULT_SLEEP_TIME;
+        }
     }
 
     Debug("Sleep interval: " + String(sleepInterval / 1000000) + " seconds (" + String(sleepInterval / 1000000 / 60) + " minutes)\r\n");
 
-    // Calculate clock-aligned sleep duration
-    uint64_t alignedSleepDuration = calculateAlignedSleepDuration(sleepInterval);
-    Debug("Aligned sleep duration: " + String(alignedSleepDuration / 1000000) + " seconds (" + String(alignedSleepDuration / 1000000 / 60) + " minutes)\r\n");
+    // Calculate clock-aligned sleep duration (skip alignment if download failed)
+    uint64_t alignedSleepDuration;
+    if (downloadFailed) {
+        // Use simple 15-minute sleep without clock alignment on download failure
+        alignedSleepDuration = sleepInterval;
+        Debug("Using non-aligned sleep for retry\r\n");
+    } else {
+        alignedSleepDuration = calculateAlignedSleepDuration(sleepInterval);
+        Debug("Aligned sleep duration: " + String(alignedSleepDuration / 1000000) + " seconds (" + String(alignedSleepDuration / 1000000 / 60) + " minutes)\r\n");
+    }
 
     // Report going to sleep
     reportDeviceStatus("sleeping", batteryVoltage, signalStrength, batteryPercent, isCharging);
@@ -321,12 +364,12 @@ bool connectToWiFi() {
 
 bool downloadAndDisplayImage() {
     Debug("=== DOWNLOADING IMAGE FROM SERVER ===\r\n");
-    
-    // Try to download to PSRAM first
-    if (downloadImageToPSRAM()) {
+
+    // Try to download to PSRAM and display immediately (using default parameters)
+    if (downloadImageToPSRAM(true, nullptr)) {
         return true;
     }
-    
+
     // If PSRAM download fails, try server's processed image endpoint
     Debug("PSRAM download failed, trying processed image from server\r\n");
 
@@ -335,29 +378,29 @@ bool downloadAndDisplayImage() {
     http.begin(url);
     http.setTimeout(60000);
     http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
-    
+
     int httpResponseCode = http.GET();
     Debug("HTTP response: " + String(httpResponseCode) + "\r\n");
-    
+
     if (httpResponseCode == 200) {
         String payload = http.getString();
         http.end();
-        
+
         // Parse JSON response (simplified - assuming server sends pre-processed e-ink data)
         DynamicJsonDocument doc(1024);
         DeserializationError error = deserializeJson(doc, payload);
-        
+
         if (!error && doc.containsKey("hasImage") && doc["hasImage"]) {
             Debug("Server has image available\r\n");
-            return downloadImageToPSRAM(); // Try PSRAM download again
+            return downloadImageToPSRAM(true, nullptr); // Try PSRAM download again with immediate display
         }
     }
-    
+
     http.end();
     return false;
 }
 
-bool downloadImageToPSRAM() {
+bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
     Debug("=== DOWNLOADING IMAGE (STREAMING) ===\r\n");
     Debug("Regular heap: " + String(ESP.getFreeHeap()) + " bytes\r\n");
     Debug("PSRAM free: " + String(ESP.getFreePsram()) + " bytes\r\n");
@@ -541,7 +584,21 @@ bool downloadImageToPSRAM() {
         }
     }
 
-    if (success) {
+    if (!success) {
+        Debug("ERROR: Incomplete download\r\n");
+        // Cleanup on failure
+        if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
+            heap_caps_free(einkBuffer);
+        } else {
+            free(einkBuffer);
+        }
+        if (rgbChunk) free(rgbChunk);
+        return false;
+    }
+
+    // Download successful
+    if (displayNow) {
+        // Display immediately and cleanup
         Debug("Displaying image...\r\n");
         sendLogToServer("Rendering image to display (30-45s)");
 
@@ -551,178 +608,28 @@ bool downloadImageToPSRAM() {
         EPD_13IN3E_Display(einkBuffer);
         Debug("SUCCESS: Image displayed!\r\n");
         sendLogToServer("Image successfully displayed");
+
+        // Cleanup
+        if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
+            heap_caps_free(einkBuffer);
+        } else {
+            free(einkBuffer);
+        }
+    } else if (outBuffer != nullptr) {
+        // Return buffer to caller for later display
+        *outBuffer = einkBuffer;
+        Debug("Image downloaded to buffer, not displaying yet\r\n");
     } else {
-        Debug("ERROR: Incomplete download\r\n");
+        // No display and no output buffer requested - cleanup
+        if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
+            heap_caps_free(einkBuffer);
+        } else {
+            free(einkBuffer);
+        }
     }
 
-    // Cleanup
-    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
-        heap_caps_free(einkBuffer);
-    } else {
-        free(einkBuffer);
-    }
     if (rgbChunk) free(rgbChunk);
-    
     return success;
-}
-
-void generateAndDisplayBhutanFlag() {
-    Debug("=== DOWNLOADING BHUTAN FLAG (FALLBACK) ===\r\n");
-    
-    // Try to download the actual Bhutan flag from server first
-    HTTPClient http;
-    String url = buildApiUrl("bhutan.bin", SERVER_HOST);
-    http.begin(url);
-    http.setTimeout(30000);
-    http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
-    
-    int httpCode = http.GET();
-    Debug("Bhutan flag download response: " + String(httpCode) + "\r\n");
-    
-    if (httpCode == 200) {
-        Debug("Server has Bhutan flag, downloading...\r\n");
-        
-        // Use streaming approach for Bhutan flag too
-        const int CHUNK_SIZE = 4096;
-        const int EINK_BUFFER_SIZE = IMAGE_BUFFER_SIZE; // 960KB
-        
-        uint8_t* einkBuffer = (uint8_t*)heap_caps_malloc(EINK_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
-        if (!einkBuffer) einkBuffer = (uint8_t*)malloc(EINK_BUFFER_SIZE);
-        
-        uint8_t* rgbChunk = (uint8_t*)malloc(CHUNK_SIZE);
-        
-        if (einkBuffer && rgbChunk) {
-            Debug("Streaming Bhutan flag conversion...\r\n");
-            memset(einkBuffer, 0, EINK_BUFFER_SIZE);
-            
-            // Stream and convert on-the-fly
-            WiFiClient* stream = http.getStreamPtr();
-            int totalBytesRead = 0;
-            int pixelIndex = 0;
-            int contentLength = http.getSize();
-            
-            while (http.connected() && totalBytesRead < contentLength) {
-                size_t available = stream->available();
-                if (available > 0) {
-                    int readSize = min((int)available, CHUNK_SIZE);
-                    readSize = (readSize / 3) * 3; // Align to RGB triplets
-                    if (readSize < 3) readSize = 3;
-                    
-                    int bytesRead = stream->readBytes(rgbChunk, readSize);
-                    totalBytesRead += bytesRead;
-                    
-                    // Process RGB triplets
-                    for (int i = 0; i < bytesRead && pixelIndex < (DISPLAY_WIDTH * DISPLAY_HEIGHT); i += 3) {
-                        if (i + 2 < bytesRead) {
-                            uint8_t r = rgbChunk[i];
-                            uint8_t g = rgbChunk[i + 1];
-                            uint8_t b = rgbChunk[i + 2];
-                            uint8_t einkColor = mapRGBToEink(r, g, b);
-                            
-                            int einkByteIndex = pixelIndex / 2;
-                            bool isEvenPixel = (pixelIndex % 2) == 0;
-                            
-                            if (isEvenPixel) {
-                                einkBuffer[einkByteIndex] = (einkColor << 4);
-                            } else {
-                                einkBuffer[einkByteIndex] |= einkColor;
-                            }
-                            
-                            pixelIndex++;
-                        }
-                    }
-                } else {
-                    delay(10);
-                }
-                esp_task_wdt_reset();
-            }
-            
-            http.end();
-            
-            if (pixelIndex >= (DISPLAY_WIDTH * DISPLAY_HEIGHT * 0.9)) {
-                Debug("Displaying actual Bhutan flag...\r\n");
-                EPD_13IN3E_Display(einkBuffer);
-                Debug("SUCCESS: Actual Bhutan flag displayed!\r\n");
-                
-                // Cleanup
-                if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
-                    heap_caps_free(einkBuffer);
-                } else {
-                    free(einkBuffer);
-                }
-                free(rgbChunk);
-                return;
-            }
-        }
-        
-        // Cleanup on failure
-        if (einkBuffer) {
-            if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) heap_caps_free(einkBuffer);
-            else free(einkBuffer);
-        }
-        if (rgbChunk) free(rgbChunk);
-    }
-    
-    http.end();
-    Debug("Server Bhutan flag failed, using simple fallback...\r\n");
-    
-    // Fallback: simple geometric flag if server fails
-    uint8_t* flagBuffer = (uint8_t*)heap_caps_malloc(IMAGE_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
-    if (!flagBuffer) {
-        flagBuffer = (uint8_t*)malloc(IMAGE_BUFFER_SIZE);
-        if (!flagBuffer) {
-            Debug("ERROR: Cannot allocate simple flag buffer\r\n");
-            return;
-        }
-    }
-    
-    memset(flagBuffer, 0, IMAGE_BUFFER_SIZE);
-    
-    // Simple diagonal Bhutan-inspired pattern
-    for (int y = 0; y < DISPLAY_HEIGHT; y++) {
-        for (int x = 0; x < DISPLAY_WIDTH; x++) {
-            int pixelIndex = y * DISPLAY_WIDTH + x;
-            int byteIndex = pixelIndex / 2;
-            bool isEvenPixel = (pixelIndex % 2) == 0;
-            
-            uint8_t color;
-            if (y < (DISPLAY_HEIGHT * x / DISPLAY_WIDTH)) {
-                color = EINK_YELLOW;
-            } else {
-                color = EINK_RED;
-            }
-            
-            // Simple white circle for dragon
-            int centerX = DISPLAY_WIDTH / 2;
-            int centerY = DISPLAY_HEIGHT / 2;
-            int dragonRadius = 200;
-            int dx = x - centerX;
-            int dy = y - centerY;
-            if (dx*dx + dy*dy < dragonRadius*dragonRadius) {
-                color = EINK_WHITE;
-            }
-            
-            if (isEvenPixel) {
-                flagBuffer[byteIndex] = (color << 4);
-            } else {
-                flagBuffer[byteIndex] |= color;
-            }
-        }
-        
-        if (y % 400 == 0) {
-            esp_task_wdt_reset();
-        }
-    }
-    
-    Debug("Displaying simple Bhutan flag fallback...\r\n");
-    EPD_13IN3E_Display(flagBuffer);
-    Debug("SUCCESS: Simple Bhutan flag displayed!\r\n");
-    
-    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
-        heap_caps_free(flagBuffer);
-    } else {
-        free(flagBuffer);
-    }
 }
 
 // Cleanly power down the e-paper panel and cut its power rail

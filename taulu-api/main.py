@@ -237,8 +237,8 @@ def logs():
     print(f"[{level}] ESP32: {msg}")
     return jsonify({"status": "logged"})
 
-@app.route('/api/bhutan.bin', methods=['GET'])
-def get_bhutan():
+@app.route('/api/white.bin', methods=['GET'])
+def get_white():
     # Fallback/Test endpoint
     data = bytes([255, 255, 255]) * (WIDTH * HEIGHT)
     return Response(data, mimetype='application/octet-stream')
