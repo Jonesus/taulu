@@ -89,14 +89,13 @@ class DailyImageManager:
                 print("Immich client not initialized (missing API key).")
                 return
 
-            # Reset images list at the start
+            # Update the date at the start
             with self.update_lock:
-                self.daily_images = []
-                self.current_index = 0
                 self.last_update_date = today
+                self.current_index = 0
                 self.save_state()
 
-            # Download up to 3 images
+            # Download up to 3 images, replacing them one by one
             for i in range(3):
                 print(f"Fetching image {i+1}/3...")
 
@@ -125,11 +124,16 @@ class DailyImageManager:
                     f.write(processed_data)
 
                 # Update state immediately after each image (thread-safe)
+                # Replace existing image at index i, or append if list is shorter
+                new_image = {
+                    'id': asset['id'],
+                    'path': filepath
+                }
                 with self.update_lock:
-                    self.daily_images.append({
-                        'id': asset['id'],
-                        'path': filepath
-                    })
+                    if i < len(self.daily_images):
+                        self.daily_images[i] = new_image
+                    else:
+                        self.daily_images.append(new_image)
                     self.save_state()
 
                 print(f"Successfully processed image {i+1}: {asset['id']}")
