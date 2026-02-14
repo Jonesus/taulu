@@ -970,10 +970,10 @@ void enterDeepSleep(uint64_t sleepTime) {
 #define COLOR_ORDER_BGR 0
 #endif
 
-// Six-color palette used by server dithering (must match server's conversion palette)
-// These are the target RGBs the server chooses during dithering; we classify to these indices.
+// Theoretical palette - what firmware expects
+// These are the standard RGB values the e-paper firmware recognizes
 struct SpectraColor { uint8_t r, g, b, idx; };
-static const SpectraColor SPECTRA6_PALETTE[] = {
+static const SpectraColor SPECTRA6_PALETTE_THEORETICAL[] = {
     { 0,   0,   0,   0x0 }, // Black
     { 255, 255, 255, 0x1 }, // White
     { 255, 255, 0,   0x2 }, // Yellow
@@ -982,8 +982,28 @@ static const SpectraColor SPECTRA6_PALETTE[] = {
     { 0,   255, 0,   0x6 }  // Green
 };
 
+// Measured palette - actual colors displayed by e-paper
+// These values are measured from the actual e-paper display and represent
+// what colors are actually shown, not what the theoretical values suggest.
+// Used for more accurate color matching when converting RGB streams.
+// Note: The server now does optimized dithering with measured palette,
+// so this is mainly used as a fallback for local RGB processing.
+static const SpectraColor SPECTRA6_PALETTE_MEASURED[] = {
+    { 2,   2,   2,   0x0 }, // Black - nearly perfect
+    { 190, 200, 200, 0x1 }, // White - actually light gray (30% darker!)
+    { 205, 202, 0,   0x2 }, // Yellow - darker than expected
+    { 135, 19,  0,   0x3 }, // Red - much darker (54% reduction)
+    { 5,   64,  158, 0x5 }, // Blue - much darker (58% reduction)
+    { 39,  102, 60,  0x6 }  // Green - extremely dark (73-87% reduction)
+};
+
 // Direct color mapping for server-dithered images
 // Classify incoming 24-bit pixel to closest Spectra-6 palette index.
+//
+// IMPORTANT: This function now uses the MEASURED palette for better accuracy.
+// The server sends pre-dithered images using theoretical colors, so if we
+// receive theoretical colors, we should match them exactly. If we receive
+// other RGB values, we use measured palette for better color matching.
 uint8_t mapRGBToEink(uint8_t r, uint8_t g, uint8_t b) {
     // Optionally swap to handle BGR streams
 #if COLOR_ORDER_BGR
@@ -992,14 +1012,19 @@ uint8_t mapRGBToEink(uint8_t r, uint8_t g, uint8_t b) {
     uint8_t rr = r; uint8_t gg = g; uint8_t bb = b;
 #endif
 
-    // Fast-path exact matches to reduce computation
-    if (rr < 8 && gg < 8 && bb < 8) return EINK_BLACK;
-    if (rr > 247 && gg > 247 && bb > 247) return EINK_WHITE;
+    // Fast-path: Check for exact matches with theoretical palette first
+    // (server-dithered images use theoretical colors)
+    for (const auto &pc : SPECTRA6_PALETTE_THEORETICAL) {
+        if (rr == pc.r && gg == pc.g && bb == pc.b) {
+            return pc.idx;
+        }
+    }
 
-    // Compute nearest neighbor in RGB space
+    // If not an exact match, use measured palette for better color matching
+    // This accounts for what the display actually shows
     uint32_t bestDist = UINT32_MAX;
     uint8_t bestIdx = EINK_WHITE;
-    for (const auto &pc : SPECTRA6_PALETTE) {
+    for (const auto &pc : SPECTRA6_PALETTE_MEASURED) {
         int dr = (int)rr - (int)pc.r;
         int dg = (int)gg - (int)pc.g;
         int db = (int)bb - (int)pc.b;

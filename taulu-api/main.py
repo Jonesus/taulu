@@ -33,7 +33,7 @@ except FileNotFoundError:
 
 # Initialize Immich Client
 IMMICH_API_KEY = os.getenv("IMMICH_API_KEY")
-IMMICH_BASE_URL = os.getenv("IMMICH_BASE_URL", "https://kuvat.palosuo.fi")
+IMMICH_BASE_URL = os.getenv("IMMICH_BASE_URL")
 immich_client = ImmichClient(api_key=IMMICH_API_KEY, base_url=IMMICH_BASE_URL) if IMMICH_API_KEY else None
 
 class DailyImageManager:
