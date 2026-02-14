@@ -277,7 +277,7 @@ void setup() {
     uint64_t sleepInterval;
     if (downloadFailed) {
         // Use 15 minutes on download failure
-        sleepInterval = 15 * 60 * 1000000ULL; // 15 minutes in microseconds
+        sleepInterval = 15 * 60 * 100000ULL; // 15 minutes in microseconds
         Debug("Download failed, using short sleep interval: 15 minutes\r\n");
         sendLogToServer("Using 15-minute sleep due to download failure");
     } else {
