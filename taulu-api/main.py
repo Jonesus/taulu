@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import datetime
 import threading
 from flask import Flask, jsonify, request, Response
@@ -232,12 +231,6 @@ def get_image():
         data = f.read()
 
     return Response(data, mimetype='application/octet-stream')
-
-@app.route('/api/time', methods=['GET'])
-def get_time():
-    return jsonify({
-        "epoch": int(time.time() * 1000)
-    })
 
 @app.route('/api/device-status', methods=['POST'])
 def device_status():

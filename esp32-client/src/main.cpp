@@ -47,7 +47,6 @@ bool detectCharging(float currentVoltage, float previousVoltage);
 void enterDeepSleep(uint64_t sleepTime);
 uint8_t mapRGBToEink(uint8_t r, uint8_t g, uint8_t b);
 uint64_t getSleepDurationFromServer();
-uint64_t calculateAlignedSleepDuration(uint64_t intervalMicroseconds);
 String buildApiUrl(const char* endpoint, const String& serverHost);
 
 // E-ink color palette
@@ -291,27 +290,16 @@ void setup() {
 
     Debug("Sleep interval: " + String(sleepInterval / 1000000) + " seconds (" + String(sleepInterval / 1000000 / 60) + " minutes)\r\n");
 
-    // Calculate clock-aligned sleep duration (skip alignment if download failed)
-    uint64_t alignedSleepDuration;
-    if (downloadFailed) {
-        // Use simple 15-minute sleep without clock alignment on download failure
-        alignedSleepDuration = sleepInterval;
-        Debug("Using non-aligned sleep for retry\r\n");
-    } else {
-        alignedSleepDuration = calculateAlignedSleepDuration(sleepInterval);
-        Debug("Aligned sleep duration: " + String(alignedSleepDuration / 1000000) + " seconds (" + String(alignedSleepDuration / 1000000 / 60) + " minutes)\r\n");
-    }
-
     // Report going to sleep
     reportDeviceStatus("sleeping", batteryVoltage, signalStrength, batteryPercent, isCharging);
-    String sleepMsg = "Entering deep sleep for " + String(alignedSleepDuration / 1000000 / 60) + " minutes";
+    String sleepMsg = "Entering deep sleep for " + String(sleepInterval / 1000000 / 60) + " minutes";
     sendLogToServer(sleepMsg.c_str());
 
     // Power down radios before sleep
     teardownRadios();
 
-    // Enter deep sleep with clock-aligned duration
-    enterDeepSleep(alignedSleepDuration);
+    // Enter deep sleep
+    enterDeepSleep(sleepInterval);
 }
 
 void loop() {
@@ -803,55 +791,6 @@ uint64_t getSleepDurationFromServer() {
 
     http.end();
     return 0; // Return 0 to indicate failure, caller will use default
-}
-
-uint64_t calculateAlignedSleepDuration(uint64_t intervalMicroseconds) {
-    Debug("Calculating clock-aligned sleep duration...\r\n");
-
-    // Get current time from server
-    HTTPClient http;
-    String url = buildApiUrl("time", SERVER_HOST);
-    http.begin(url);
-    http.setTimeout(10000);
-    http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
-
-    int httpCode = http.GET();
-
-    if (httpCode != HTTP_CODE_OK) {
-        Debug("Failed to get server time, using interval as-is\r\n");
-        http.end();
-        return intervalMicroseconds;
-    }
-
-    String payload = http.getString();
-    http.end();
-
-    // Parse JSON to get current epoch time in milliseconds
-    DynamicJsonDocument doc(512);
-    DeserializationError error = deserializeJson(doc, payload);
-
-    if (error || !doc.containsKey("epoch")) {
-        Debug("Failed to parse server time, using interval as-is\r\n");
-        return intervalMicroseconds;
-    }
-
-    uint64_t currentEpochMs = doc["epoch"]; // Current time in milliseconds
-    Debug("Current epoch: " + String(currentEpochMs) + " ms\r\n");
-
-    // Convert interval from microseconds to milliseconds
-    uint64_t intervalMs = intervalMicroseconds / 1000;
-
-    // Calculate milliseconds since the last interval boundary
-    uint64_t msSinceLastInterval = currentEpochMs % intervalMs;
-
-    // Calculate milliseconds until next interval boundary
-    uint64_t msUntilNextInterval = intervalMs - msSinceLastInterval;
-
-    Debug("Time since last interval: " + String(msSinceLastInterval / 1000) + " seconds\r\n");
-    Debug("Time until next interval: " + String(msUntilNextInterval / 1000) + " seconds\r\n");
-
-    // Convert back to microseconds
-    return msUntilNextInterval * 1000;
 }
 
 // Helper function to build API URL
