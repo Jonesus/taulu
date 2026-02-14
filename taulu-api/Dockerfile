@@ -59,4 +59,4 @@ EXPOSE 3000
 
 # Run the application using Gunicorn
 # 4 workers is a reasonable starting point; adjust based on resources
-CMD ["gunicorn", "--workers", "4", "--bind", "0.0.0.0:3000", "main:app"]
+CMD ["gunicorn", "--workers", "1", "--bind", "0.0.0.0:3000", "main:app"]

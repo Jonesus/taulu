@@ -181,6 +181,7 @@ class DailyImageManager:
             return image
 
 manager = DailyImageManager()
+manager.ensure_daily_image()
 
 @app.route('/api/current.json', methods=['GET'])
 def get_current():
@@ -244,8 +245,5 @@ def get_white():
     return Response(data, mimetype='application/octet-stream')
 
 if __name__ == '__main__':
-    # Initial check (only in the reloader process to avoid running twice in debug mode)
-    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-        manager.ensure_daily_image()
     print("Starting server at http://0.0.0.0:3000")
     app.run(host='0.0.0.0', port=3000, debug=True)
