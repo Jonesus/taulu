@@ -277,7 +277,7 @@ void setup() {
     uint64_t sleepInterval;
     if (downloadFailed) {
         // Use 15 minutes on download failure
-        sleepInterval = 15 * 60 * 100000ULL; // 15 minutes in microseconds
+        sleepInterval = 15 * 60 * 1000000ULL; // 15 minutes in microseconds
         Debug("Download failed, using short sleep interval: 15 minutes\r\n");
         sendLogToServer("Using 15-minute sleep due to download failure");
     } else {
@@ -304,7 +304,8 @@ void setup() {
 
     // Report going to sleep
     reportDeviceStatus("sleeping", batteryVoltage, signalStrength, batteryPercent, isCharging);
-    sendLogToServer("Entering deep sleep");
+    String sleepMsg = "Entering deep sleep for " + String(alignedSleepDuration / 1000000 / 60) + " minutes";
+    sendLogToServer(sleepMsg.c_str());
 
     // Power down radios before sleep
     teardownRadios();
@@ -862,10 +863,10 @@ void enterDeepSleep(uint64_t sleepTime) {
     Debug("Entering deep sleep for " + String(sleepTime / 1000000) + " seconds\r\n");
 
     // Hold display power rail off during deep sleep to prevent leakage
-    rtc_gpio_init((gpio_num_t)EPD_PWR_PIN);
-    rtc_gpio_set_direction((gpio_num_t)EPD_PWR_PIN, RTC_GPIO_MODE_OUTPUT_ONLY);
-    rtc_gpio_set_level((gpio_num_t)EPD_PWR_PIN, 0);
-    rtc_gpio_hold_en((gpio_num_t)EPD_PWR_PIN);
+    // Note: EPD_PWR_PIN (GPIO 45) is not RTC-capable on ESP32-S3, so use standard GPIO hold
+    pinMode(EPD_PWR_PIN, OUTPUT);
+    digitalWrite(EPD_PWR_PIN, LOW);
+    gpio_hold_en((gpio_num_t)EPD_PWR_PIN);
     gpio_deep_sleep_hold_en();
 
     esp_sleep_enable_timer_wakeup(sleepTime);
