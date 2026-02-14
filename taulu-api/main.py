@@ -2,6 +2,7 @@ import os
 import json
 import datetime
 import threading
+import logging
 from flask import Flask, jsonify, request, Response
 from dotenv import load_dotenv
 
@@ -12,6 +13,14 @@ from prepare import convert_image_to_bin
 load_dotenv()
 
 app = Flask(__name__)
+
+# Configure logging with timestamps
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%dT%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Configuration
 WIDTH = 1200
@@ -192,6 +201,8 @@ manager.ensure_daily_image()
 
 @app.route('/api/current.json', methods=['GET'])
 def get_current():
+    logger.info(f"GET /api/current.json from {request.remote_addr}")
+
     # Trigger update check (non-blocking)
     manager.ensure_daily_image()
 
@@ -207,6 +218,8 @@ def get_current():
     seconds_until_next_hour = (next_hour - now).total_seconds()
     sleep_duration_us = int(seconds_until_next_hour * 1_000_000)
 
+    logger.info(f"Responding with imageId={current_image_id}, sleepDuration={sleep_duration_us/1_000_000:.0f}s, hasImage={has_images}")
+
     return jsonify({
         "imageId": current_image_id,
         "sleepDuration": sleep_duration_us,
@@ -218,6 +231,8 @@ def get_current():
 
 @app.route('/api/image.bin', methods=['GET'])
 def get_image():
+    logger.info(f"GET /api/image.bin from {request.remote_addr}")
+
     # Trigger update check (non-blocking)
     manager.ensure_daily_image()
 
@@ -225,7 +240,10 @@ def get_image():
     image = manager.get_next_image()
 
     if not image or not os.path.exists(image['path']):
+        logger.warning(f"No image available for {request.remote_addr}")
         return "No image ready", 404
+
+    logger.info(f"Serving image {image['id']} ({os.path.getsize(image['path'])} bytes)")
 
     with open(image['path'], 'rb') as f:
         data = f.read()
@@ -234,7 +252,7 @@ def get_image():
 
 @app.route('/api/device-status', methods=['POST'])
 def device_status():
-    print(f"\n[DEVICE STATUS] {request.json}")
+    logger.info(f"POST /api/device-status from {request.remote_addr}: {request.json}")
     return jsonify({"status": "received"})
 
 @app.route('/api/logs', methods=['POST'])
@@ -242,15 +260,17 @@ def logs():
     data = request.json
     level = data.get('logLevel', 'INFO')
     msg = data.get('logs', '')
-    print(f"[{level}] ESP32: {msg}")
+    device_id = data.get('deviceId', 'unknown')
+    logger.info(f"POST /api/logs from {request.remote_addr} - [{level}] {device_id}: {msg}")
     return jsonify({"status": "logged"})
 
 @app.route('/api/white.bin', methods=['GET'])
 def get_white():
+    logger.info(f"GET /api/white.bin from {request.remote_addr}")
     # Fallback/Test endpoint
     data = bytes([255, 255, 255]) * (WIDTH * HEIGHT)
     return Response(data, mimetype='application/octet-stream')
 
 if __name__ == '__main__':
-    print("Starting server at http://0.0.0.0:3000")
+    logger.info("Starting server at http://0.0.0.0:3000")
     app.run(host='0.0.0.0', port=3000, debug=True)
