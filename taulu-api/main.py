@@ -202,9 +202,15 @@ def get_current():
         image_count = len(manager.daily_images)
         current_image_id = manager.daily_images[manager.current_index]['id'] if has_images else "no-image"
 
+    # Calculate sleep duration until next exact hour
+    now = datetime.datetime.now()
+    next_hour = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    seconds_until_next_hour = (next_hour - now).total_seconds()
+    sleep_duration_us = int(seconds_until_next_hour * 1_000_000)
+
     return jsonify({
         "imageId": current_image_id,
-        "sleepDuration": 240_000_000, # Example value
+        "sleepDuration": sleep_duration_us,
         "hasImage": has_images,
         "imageCount": image_count,
         "updating": updating,
