@@ -309,20 +309,17 @@ void loop() {
 
 void setupPowerManagement() {
     Debug("Setting up power management...\r\n");
-    
+
     // Configure watchdog timer
     esp_task_wdt_init(300, true);
     esp_task_wdt_add(NULL);
-    
+
     // Prefer modem sleep while connected to reduce peak current
     WiFi.setSleep(true);
 
     // ADC config for better voltage readings
     analogReadResolution(12);
     analogSetPinAttenuation(BATTERY_PIN, ADC_11db);
-    
-    // Configure wake-up source
-    esp_sleep_enable_timer_wakeup(DEFAULT_SLEEP_TIME);
 }
 
 bool connectToWiFi() {
