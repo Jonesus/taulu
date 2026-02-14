@@ -3,26 +3,41 @@
 # ESP32 Glance Client Build Script
 # Usage: ./build.sh [compile|upload|monitor]
 
+# Load environment variables from .env file if it exists
+if [[ -f .env ]]; then
+    echo "📄 Loading configuration from .env file..."
+    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+else
+    echo "⚠️  Warning: .env file not found. Using environment variables or defaults."
+fi
+
 # Check for required environment variables
 if [[ -z "$WIFI_SSID" || -z "$WIFI_PASSWORD" ]]; then
     echo "❌ Error: WiFi credentials not set!"
     echo ""
-    echo "Please set environment variables:"
+    echo "Please create a .env file with:"
+    echo "  WIFI_SSID=YourWiFiNetwork"
+    echo "  WIFI_PASSWORD=YourWiFiPassword"
+    echo ""
+    echo "Or set environment variables:"
     echo "  export WIFI_SSID=\"YourWiFiNetwork\""
     echo "  export WIFI_PASSWORD=\"YourWiFiPassword\""
     echo ""
     echo "Optional variables:"
-    echo "  export DEVICE_ID=\"esp32-001\"        # Default: esp32-001"
+    echo "  DEVICE_ID=esp32-001        # Default: esp32-001"
+    echo "  SERVER_HOST=192.168.1.124:3000"
     exit 1
 fi
 
 # Set defaults for optional variables
 export DEVICE_ID=${DEVICE_ID:-"esp32-001"}
+export SERVER_HOST=${SERVER_HOST:-"192.168.1.124:3000"}
 
 # Show configuration (without password)
 echo "=== ESP32 Build Configuration ==="
-echo "WIFI_SSID: $WIFI_SSID"
-echo "DEVICE_ID: $DEVICE_ID"
+echo "WIFI_SSID:   $WIFI_SSID"
+echo "DEVICE_ID:   $DEVICE_ID"
+echo "SERVER_HOST: $SERVER_HOST"
 echo "================================="
 
 # Default action
