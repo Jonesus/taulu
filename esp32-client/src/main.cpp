@@ -799,11 +799,10 @@ void enterDeepSleep(uint64_t sleepTime) {
     Debug("Entering deep sleep for " + String(sleepTime / 1000000) + " seconds\r\n");
 
     // Hold display power rail off during deep sleep to prevent leakage
-    // Note: EPD_PWR_PIN (GPIO 45) is not RTC-capable on ESP32-S3, so use standard GPIO hold
-    pinMode(EPD_PWR_PIN, OUTPUT);
-    digitalWrite(EPD_PWR_PIN, LOW);
-    gpio_hold_en((gpio_num_t)EPD_PWR_PIN);
-    gpio_deep_sleep_hold_en();
+    rtc_gpio_init((gpio_num_t)EPD_PWR_PIN);
+    rtc_gpio_set_direction((gpio_num_t)EPD_PWR_PIN, RTC_GPIO_MODE_OUTPUT_ONLY);
+    rtc_gpio_set_level((gpio_num_t)EPD_PWR_PIN, 0);
+    rtc_gpio_hold_en((gpio_num_t)EPD_PWR_PIN);
 
     esp_sleep_enable_timer_wakeup(sleepTime);
     esp_deep_sleep_start();
