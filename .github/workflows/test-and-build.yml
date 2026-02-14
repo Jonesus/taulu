@@ -145,7 +145,6 @@ jobs:
         with:
           context: ./taulu-api
           file: ./taulu-api/Dockerfile
-          platforms: linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
