@@ -199,6 +199,23 @@ class DailyImageManager:
 manager = DailyImageManager()
 manager.ensure_daily_image()
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Kubernetes liveness probe - checks if app is alive"""
+    return jsonify({"status": "healthy"}), 200
+
+@app.route('/ready', methods=['GET'])
+def ready():
+    """Kubernetes readiness probe - checks if app is ready to serve traffic"""
+    with manager.update_lock:
+        has_images = len(manager.daily_images) > 0
+        is_updating = manager.updating
+
+    if has_images or is_updating:
+        return jsonify({"status": "ready", "hasImages": has_images, "updating": is_updating}), 200
+    else:
+        return jsonify({"status": "not ready", "reason": "no images available"}), 503
+
 @app.route('/api/current.json', methods=['GET'])
 def get_current():
     logger.info(f"GET /api/current.json from {request.remote_addr}")
