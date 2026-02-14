@@ -29,6 +29,12 @@ READY_DIR = os.path.join(os.path.dirname(__file__), 'ready')
 STATE_FILE = os.path.join(os.path.dirname(__file__), 'state.json')
 PEOPLE_IDS_FILE = os.path.join(os.path.dirname(__file__), 'people-ids.json')
 
+# Sleep configuration - choose ONE of:
+# SLEEP_MINUTES: Fixed sleep duration in minutes between image refreshes
+# REFRESH_HOUR: Hour of day (0-23) when display should wake to refresh (defaults to hourly refresh)
+SLEEP_MINUTES = os.getenv("SLEEP_MINUTES")
+REFRESH_HOUR = os.getenv("REFRESH_HOUR")
+
 # Ensure ready directory exists
 os.makedirs(READY_DIR, exist_ok=True)
 
@@ -229,11 +235,40 @@ def get_current():
         image_count = len(manager.daily_images)
         current_image_id = manager.daily_images[manager.current_index]['id'] if has_images else "no-image"
 
-    # Calculate sleep duration until next exact hour
+    # Calculate sleep duration based on configuration
     now = datetime.datetime.now()
-    next_hour = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-    seconds_until_next_hour = (next_hour - now).total_seconds()
-    sleep_duration_us = int(seconds_until_next_hour * 1_000_000)
+    
+    if SLEEP_MINUTES:
+        # Use fixed sleep duration in minutes
+        try:
+            sleep_minutes = float(SLEEP_MINUTES)
+            sleep_duration_us = int(sleep_minutes * 60 * 1_000_000)
+        except ValueError:
+            logger.warning(f"Invalid SLEEP_MINUTES value: {SLEEP_MINUTES}, defaulting to 1 hour")
+            sleep_duration_us = int(3600 * 1_000_000)
+    elif REFRESH_HOUR is not None:
+        # Calculate time until specific hour of day
+        try:
+            refresh_hour = int(REFRESH_HOUR)
+            if not 0 <= refresh_hour <= 23:
+                raise ValueError("REFRESH_HOUR must be between 0 and 23")
+            
+            refresh_time = now.replace(hour=refresh_hour, minute=0, second=0, microsecond=0)
+            
+            # If refresh time has already passed today, schedule for tomorrow
+            if refresh_time <= now:
+                refresh_time += datetime.timedelta(days=1)
+            
+            seconds_until_refresh = (refresh_time - now).total_seconds()
+            sleep_duration_us = int(seconds_until_refresh * 1_000_000)
+        except ValueError as e:
+            logger.warning(f"Invalid REFRESH_HOUR value: {REFRESH_HOUR} - {e}, defaulting to 1 hour")
+            sleep_duration_us = int(3600 * 1_000_000)
+    else:
+        # Default: sleep until next exact hour
+        next_hour = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        seconds_until_next_hour = (next_hour - now).total_seconds()
+        sleep_duration_us = int(seconds_until_next_hour * 1_000_000)
 
     logger.info(f"Responding with imageId={current_image_id}, sleepDuration={sleep_duration_us/1_000_000:.0f}s, hasImage={has_images}")
 
