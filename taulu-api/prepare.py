@@ -274,7 +274,7 @@ def convert_image_to_bin(image_input: str | BytesIO, use_optimizations: bool = T
     image = resize_and_truncate(image, (1600, 1200))
 
     # Rotate 90 degrees
-    image = image.rotate(90, expand=True)
+    image = image.rotate(270, expand=True)
 
     # Convert to RGB
     image = image.convert('RGB')
