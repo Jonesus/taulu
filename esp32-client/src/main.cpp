@@ -24,6 +24,13 @@
 #endif
 #define FIRMWARE_VERSION "v2-psram-battery-3.0"
 
+// Powerbank keep-alive: wake interval to prevent powerbank shutdown
+// During deep sleep, ESP32 wakes every LIGHT_WAKE_INTERVAL to draw current
+#ifndef LIGHT_WAKE_INTERVAL_SECONDS
+#define LIGHT_WAKE_INTERVAL_SECONDS 30
+#endif
+#define LIGHT_WAKE_INTERVAL (LIGHT_WAKE_INTERVAL_SECONDS * 1000000ULL) // Convert to microseconds
+
 // Dev mode: ESP32 tries dev server first if provided, falls back to production
 // Fallback is reported to production for auto-disable
 
@@ -62,6 +69,10 @@ RTC_DATA_ATTR char lastDisplayedImageId[65] = ""; // Stores imageId (64 chars + 
 RTC_DATA_ATTR float lastBatteryVoltage = 0.0f; // Previous voltage reading for charging detection
 RTC_DATA_ATTR uint32_t bootCount = 0; // Track number of wake cycles
 
+// RTC memory for powerbank keep-alive: track remaining sleep time across light wakes
+RTC_DATA_ATTR uint64_t remainingSleepUs = 0; // Remaining sleep time in microseconds
+RTC_DATA_ATTR bool isInDeepSleepCycle = false; // True when in middle of long sleep with periodic wakes
+
 // Dev mode tracking (not stored in RTC, resets each wake)
 String devServerHost = ""; // e.g. "192.168.1.26:3000"
 bool usedFallback = false; // true if we tried dev server but it failed
@@ -69,16 +80,66 @@ bool usedFallback = false; // true if we tried dev server but it failed
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    
+
+    // Increment boot counter first
+    bootCount++;
+
+    // LIGHT WAKE CHECK: If we're in the middle of a long sleep cycle,
+    // briefly connect to WiFi to draw current and keep powerbank alive
+    if (isInDeepSleepCycle && remainingSleepUs > 0) {
+        Debug("Light wake #" + String(bootCount) + ": " + String(remainingSleepUs / 1000000) + "s remaining\r\n");
+
+        // Calculate how long we actually slept
+        uint64_t sleptDuration = min(LIGHT_WAKE_INTERVAL, remainingSleepUs);
+
+        // Subtract from remaining sleep time
+        if (remainingSleepUs >= sleptDuration) {
+            remainingSleepUs -= sleptDuration;
+        } else {
+            remainingSleepUs = 0;
+        }
+
+        // If we still have time to sleep, briefly connect WiFi to draw
+        // enough current to keep the powerbank alive, then go back to sleep
+        if (remainingSleepUs > 0) {
+            // Brief WiFi connect to draw ~100-200mA and fool the powerbank
+            if (connectToWiFi()) {
+                String heartbeat = "Display heartbeat, next sleep approx. " + String(remainingSleepUs / 1000000) + " seconds";
+                sendLogToServer(heartbeat.c_str(), "DEBUG");
+                teardownRadios();
+            }
+
+            uint64_t awakeFor = esp_timer_get_time();
+            if (remainingSleepUs > awakeFor) {
+                remainingSleepUs -= awakeFor;
+            } else {
+                remainingSleepUs = 0;
+            }
+
+            uint64_t nextSleepDuration = min(LIGHT_WAKE_INTERVAL, remainingSleepUs);
+            Debug("Awake for " + String(awakeFor / 1000) + "ms, Continuing sleep for " + String(nextSleepDuration / 1000000) + "s\r\n");
+
+            esp_sleep_enable_timer_wakeup(nextSleepDuration);
+            esp_deep_sleep_start();
+            // Never returns
+        }
+
+        // If we reach here, sleep cycle is complete
+        Debug("Sleep cycle complete, proceeding to full wake\r\n");
+        isInDeepSleepCycle = false;
+        remainingSleepUs = 0;
+    }
+
+    // FULL WAKE: Normal operation with WiFi and display
     Debug("=== ESP32 Feather v2 E-ink Display ===\r\n");
     Debug("Device ID: " DEVICE_ID "\r\n");
     Debug("Firmware: " FIRMWARE_VERSION "\r\n");
     Debug("Display: Waveshare 13.3\" Spectra 6\r\n");
     Debug("=======================================\r\n");
-    
+
     // Check PSRAM availability (ESP32-PICO-V3 has embedded PSRAM)
     Debug("Regular heap: " + String(ESP.getFreeHeap()) + " bytes\r\n");
-    
+
     // Initialize PSRAM if available
     if (psramInit()) {
         Debug("PSRAM initialized successfully\r\n");
@@ -88,12 +149,10 @@ void setup() {
         Debug("PSRAM initialization failed or not available\r\n");
         Debug("PSRAM via heap_caps: " + String(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)) + " bytes\r\n");
     }
-    
+
     // Setup power management
     setupPowerManagement();
 
-    // Increment boot counter
-    bootCount++;
     Debug("Boot count: " + String(bootCount) + "\r\n");
 
     // Read battery voltage and calculate metrics
@@ -804,7 +863,19 @@ void enterDeepSleep(uint64_t sleepTime) {
     rtc_gpio_set_level((gpio_num_t)EPD_PWR_PIN, 0);
     rtc_gpio_hold_en((gpio_num_t)EPD_PWR_PIN);
 
-    esp_sleep_enable_timer_wakeup(sleepTime);
+    // Powerbank keep-alive: Wake periodically to draw current
+    // This prevents powerbank from shutting off during long sleep periods
+
+    // Initialize sleep cycle tracking
+    remainingSleepUs = sleepTime;
+    isInDeepSleepCycle = true;
+
+    // Sleep for either LIGHT_WAKE_INTERVAL or remaining time, whichever is shorter
+    uint64_t actualSleepTime = min(LIGHT_WAKE_INTERVAL, sleepTime);
+    Debug("First sleep segment: " + String(actualSleepTime / 1000000) + " seconds\r\n");
+    Debug("Powerbank keep-alive: will wake every " + String(LIGHT_WAKE_INTERVAL_SECONDS) + "s until " + String(sleepTime / 1000000) + "s elapsed\r\n");
+
+    esp_sleep_enable_timer_wakeup(actualSleepTime);
     esp_deep_sleep_start();
 }
 
