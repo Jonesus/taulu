@@ -46,23 +46,23 @@ ACTION=${1:-"upload"}
 case $ACTION in
     "compile"|"build")
         echo "🔨 Compiling ESP32 client..."
-        platformio run --environment gooddisplay_esp32
+        platformio run --environment xiao_ee02
         ;;
     "upload")
         echo "📤 Building and uploading to ESP32..."
-        platformio run --target upload --target monitor --environment gooddisplay_esp32
+        platformio run --target upload --target monitor --environment xiao_ee02
         ;;
     "monitor")
         echo "🖥️  Starting serial monitor..."
-        platformio device monitor --environment gooddisplay_esp32
+        platformio device monitor --environment xiao_ee02
         ;;
     "clean")
         echo "🧹 Cleaning build files..."
-        platformio run --target clean --environment gooddisplay_esp32
+        platformio run --target clean --environment xiao_ee02
         ;;
     "fullclean")
         echo "🧹 Full clean - removing all build artifacts..."
-        platformio run --target cleanall --environment gooddisplay_esp32
+        platformio run --target cleanall --environment xiao_ee02
         rm -rf .pio/
         rm -rf .vscode/
         echo "✅ Full clean complete"

@@ -7,6 +7,7 @@
 #include "esp_sleep.h"
 #include "esp_task_wdt.h"
 #include "driver/rtc_io.h"
+#include "driver/gpio.h"
 #include "esp_wifi.h"
 #include "esp_bt.h"
 
@@ -17,22 +18,23 @@
 #endif
 
 #define DEFAULT_SLEEP_TIME 3600000000ULL // 1 hour
-#define BATTERY_PIN A13
 #define LOW_BATTERY_THRESHOLD 3.3
 #ifndef DEVICE_ID
 #define DEVICE_ID "esp32-001"
 #endif
-#define FIRMWARE_VERSION "v2-psram-battery-3.0"
+#define FIRMWARE_VERSION "v3-ee02-1.0"
 
-// Powerbank keep-alive: wake interval to prevent powerbank shutdown
-// During deep sleep, ESP32 wakes every LIGHT_WAKE_INTERVAL to draw current
-#ifndef LIGHT_WAKE_INTERVAL_SECONDS
-#define LIGHT_WAKE_INTERVAL_SECONDS 30
+// Board-specific battery and button pins
+#ifdef BOARD_XIAO_EE02
+#define BATTERY_PIN     1   // GPIO1 (A0) - battery voltage ADC
+#define ADC_ENABLE_PIN  6   // GPIO6 (A5) - must be HIGH to enable ADC
+#define BUTTON_KEY0     2   // GPIO2 - refresh (active-low)
+#define BUTTON_KEY1     3   // GPIO3 - previous (active-low)
+#define BUTTON_KEY2     5   // GPIO5 - next (active-low)
+#define BUTTON_WAKE_MASK ((1ULL << BUTTON_KEY0) | (1ULL << BUTTON_KEY1) | (1ULL << BUTTON_KEY2))
+#else
+#define BATTERY_PIN A13
 #endif
-#define LIGHT_WAKE_INTERVAL (LIGHT_WAKE_INTERVAL_SECONDS * 1000000ULL) // Convert to microseconds
-
-// Dev mode: ESP32 tries dev server first if provided, falls back to production
-// Fallback is reported to production for auto-disable
 
 // Display dimensions
 #define DISPLAY_WIDTH 1200
@@ -48,6 +50,7 @@ bool downloadAndDisplayImage();
 bool downloadImageToPSRAM(bool displayNow = true, uint8_t** outBuffer = nullptr);
 void reportDeviceStatus(const char *status, float batteryVoltage, int signalStrength, int batteryPercent, bool isCharging);
 void sendLogToServer(const char *message, const char *level = "INFO");
+void sendActionToServer(const char *action);
 float readBatteryVoltage();
 int calculateBatteryPercentage(float voltage);
 bool detectCharging(float currentVoltage, float previousVoltage);
@@ -69,10 +72,6 @@ RTC_DATA_ATTR char lastDisplayedImageId[65] = ""; // Stores imageId (64 chars + 
 RTC_DATA_ATTR float lastBatteryVoltage = 0.0f; // Previous voltage reading for charging detection
 RTC_DATA_ATTR uint32_t bootCount = 0; // Track number of wake cycles
 
-// RTC memory for powerbank keep-alive: track remaining sleep time across light wakes
-RTC_DATA_ATTR uint64_t remainingSleepUs = 0; // Remaining sleep time in microseconds
-RTC_DATA_ATTR bool isInDeepSleepCycle = false; // True when in middle of long sleep with periodic wakes
-
 // Dev mode tracking (not stored in RTC, resets each wake)
 String devServerHost = ""; // e.g. "192.168.1.26:3000"
 bool usedFallback = false; // true if we tried dev server but it failed
@@ -81,66 +80,34 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    // Increment boot counter first
+    // Increment boot counter
     bootCount++;
 
-    // LIGHT WAKE CHECK: If we're in the middle of a long sleep cycle,
-    // briefly connect to WiFi to draw current and keep powerbank alive
-    if (isInDeepSleepCycle && remainingSleepUs > 0) {
-        Debug("Light wake #" + String(bootCount) + ": " + String(remainingSleepUs / 1000000) + "s remaining\r\n");
+    // Detect wakeup cause and which button (if any) triggered it
+    esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
+    bool buttonWake = (wakeupCause == ESP_SLEEP_WAKEUP_EXT1);
+    int8_t wakeButton = -1; // -1 = not a button wake
 
-        // Calculate how long we actually slept
-        uint64_t sleptDuration = min(LIGHT_WAKE_INTERVAL, remainingSleepUs);
-
-        // Subtract from remaining sleep time
-        if (remainingSleepUs >= sleptDuration) {
-            remainingSleepUs -= sleptDuration;
-        } else {
-            remainingSleepUs = 0;
-        }
-
-        // If we still have time to sleep, briefly connect WiFi to draw
-        // enough current to keep the powerbank alive, then go back to sleep
-        if (remainingSleepUs > 0) {
-            // Brief WiFi connect to draw ~100-200mA and fool the powerbank
-            if (connectToWiFi()) {
-                String heartbeat = "Display heartbeat, next sleep approx. " + String(remainingSleepUs / 1000000) + " seconds";
-                sendLogToServer(heartbeat.c_str(), "DEBUG");
-                teardownRadios();
-            }
-
-            uint64_t awakeFor = esp_timer_get_time();
-            if (remainingSleepUs > awakeFor) {
-                remainingSleepUs -= awakeFor;
-            } else {
-                remainingSleepUs = 0;
-            }
-
-            uint64_t nextSleepDuration = min(LIGHT_WAKE_INTERVAL, remainingSleepUs);
-            Debug("Awake for " + String(awakeFor / 1000) + "ms, Continuing sleep for " + String(nextSleepDuration / 1000000) + "s\r\n");
-
-            esp_sleep_enable_timer_wakeup(nextSleepDuration);
-            esp_deep_sleep_start();
-            // Never returns
-        }
-
-        // If we reach here, sleep cycle is complete
-        Debug("Sleep cycle complete, proceeding to full wake\r\n");
-        isInDeepSleepCycle = false;
-        remainingSleepUs = 0;
+#ifdef BOARD_XIAO_EE02
+    if (buttonWake) {
+        uint64_t wakeStatus = esp_sleep_get_ext1_wakeup_status();
+        if (wakeStatus & (1ULL << BUTTON_KEY0))      wakeButton = 0; // refresh
+        else if (wakeStatus & (1ULL << BUTTON_KEY1)) wakeButton = 1; // previous
+        else if (wakeStatus & (1ULL << BUTTON_KEY2)) wakeButton = 2; // next
+        Debug("Button wake: KEY" + String(wakeButton) + "\r\n");
     }
+#endif
 
     // FULL WAKE: Normal operation with WiFi and display
-    Debug("=== ESP32 Feather v2 E-ink Display ===\r\n");
+    Debug("=== XIAO EE02 E-ink Display ===\r\n");
     Debug("Device ID: " DEVICE_ID "\r\n");
     Debug("Firmware: " FIRMWARE_VERSION "\r\n");
-    Debug("Display: Waveshare 13.3\" Spectra 6\r\n");
-    Debug("=======================================\r\n");
+    Debug("Display: 13.3\" Spectra 6\r\n");
+    Debug("===============================\r\n");
 
-    // Check PSRAM availability (ESP32-PICO-V3 has embedded PSRAM)
+    // Check PSRAM availability
     Debug("Regular heap: " + String(ESP.getFreeHeap()) + " bytes\r\n");
 
-    // Initialize PSRAM if available
     if (psramInit()) {
         Debug("PSRAM initialized successfully\r\n");
         Debug("PSRAM size: " + String(ESP.getPsramSize()) + " bytes\r\n");
@@ -177,24 +144,27 @@ void setup() {
 
     // Connect to WiFi
     if (!connectToWiFi()) {
-        Debug("WiFi connection failed, displaying fallback flag\r\n");
-        sendLogToServer("WiFi connection failed after 20 attempts", "ERROR");
+        Debug("WiFi connection failed, entering sleep\r\n");
         enterDeepSleep(DEFAULT_SLEEP_TIME);
         return;
     }
 
     // Log successful WiFi connection
-    String wifiMsg = "WiFi connected successfully, signal: " + String(WiFi.RSSI()) + " dBm";
+    String wifiMsg = "WiFi connected, signal: " + String(WiFi.RSSI()) + " dBm";
     sendLogToServer(wifiMsg.c_str());
 
     // Report device status
     int signalStrength = WiFi.RSSI();
     reportDeviceStatus("awake", batteryVoltage, signalStrength, batteryPercent, isCharging);
-    sendLogToServer("ESP32 v2 awakened, checking for new image");
 
-    // Note: Always connect to production server (SERVER_HOST)
-    // Dev mode is handled server-side via proxy - production server
-    // forwards requests to dev server when dev mode is enabled
+    // If woken by a button, send the action to the server before fetching the image.
+    // The server will update which image is "current" based on the action.
+    if (buttonWake && wakeButton >= 0) {
+        const char* actions[] = {"refresh", "previous", "next"};
+        sendActionToServer(actions[wakeButton]);
+    } else {
+        sendLogToServer("Timer wake, checking for new image");
+    }
 
     // Check if image has changed by comparing imageId
     Debug("Last displayed imageId: " + String(lastDisplayedImageId) + "\r\n");
@@ -203,7 +173,7 @@ void setup() {
     String url = buildApiUrl("current.json", SERVER_HOST);
     http.begin(url);
     http.setTimeout(30000);
-    http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
+    http.addHeader("User-Agent", "ESP32-Glance-v3/" FIRMWARE_VERSION);
 
     int httpResponseCode = http.GET();
     String currentImageId = "";
@@ -227,7 +197,10 @@ void setup() {
             }
 
             // Compare with last displayed imageId
-            if (strlen(lastDisplayedImageId) > 0 && currentImageId.equals(lastDisplayedImageId)) {
+            // Always refresh on button wake since server may have changed the image
+            if (buttonWake) {
+                Debug("Button wake - forcing display update\r\n");
+            } else if (strlen(lastDisplayedImageId) > 0 && currentImageId.equals(lastDisplayedImageId)) {
                 imageChanged = false;
                 Debug("Image unchanged - skipping display update\r\n");
                 sendLogToServer("Image unchanged, skipping update to save power");
@@ -254,15 +227,12 @@ void setup() {
 
     // Only proceed with display update if we successfully fetched metadata and image changed
     if (!metadataFetched) {
-        // Failed to fetch metadata - skip display update to save power
         Debug("Skipping display update due to metadata fetch failure\r\n");
         sendLogToServer("Metadata fetch failed, skipping display update", "ERROR");
         reportDeviceStatus("metadata_fetch_failed", batteryVoltage, signalStrength, batteryPercent, isCharging);
     } else if (!imageChanged) {
-        // Image hasn't changed, skip display update
         reportDeviceStatus("display_unchanged", batteryVoltage, signalStrength, batteryPercent, isCharging);
     } else {
-        // Image has changed or this is first boot, proceed with update
         Debug("Proceeding with display update\r\n");
         sendLogToServer("Starting display update for new image");
 
@@ -274,7 +244,6 @@ void setup() {
         bool downloadSuccess = downloadImageToPSRAM(false, &imageBuffer);
 
         if (downloadSuccess && imageBuffer != nullptr) {
-            // Download succeeded, now initialize and clear display
             Debug("Download successful, initializing display...\r\n");
             sendLogToServer("Download successful, initializing display");
 
@@ -283,7 +252,6 @@ void setup() {
             EPD_13IN3E_Init();
             delay(2000);
 
-            // Clear display with white background
             Debug("Clearing display...\r\n");
             sendLogToServer("Clearing display (30-45s)");
             EPD_13IN3E_Clear(EINK_WHITE);
@@ -291,7 +259,6 @@ void setup() {
             sendLogToServer("Display cleared, rendering new image");
             delay(1000);
 
-            // Display the downloaded image
             Debug("Displaying downloaded image...\r\n");
             sendLogToServer("Rendering image to display (30-45s)");
             delay(2000);
@@ -320,26 +287,20 @@ void setup() {
             // Power down display after update
             powerDownDisplay();
         } else {
-            // Download failed, keep previous image on display
             Debug("Download failed, keeping previous image\r\n");
             sendLogToServer("Download failed, keeping previous image on display", "ERROR");
             reportDeviceStatus("download_failed", batteryVoltage, signalStrength, batteryPercent, isCharging);
-
-            // Do NOT clear display, do NOT show fallback
-            // Display is left untouched with previous image
             downloadFailed = true;
         }
     }
 
-    // Get sleep interval - use short interval if download failed
+    // Get sleep interval
     uint64_t sleepInterval;
     if (downloadFailed) {
-        // Use 15 minutes on download failure
-        sleepInterval = 15 * 60 * 1000000ULL; // 15 minutes in microseconds
+        sleepInterval = 15 * 60 * 1000000ULL; // 15 minutes on download failure
         Debug("Download failed, using short sleep interval: 15 minutes\r\n");
         sendLogToServer("Using 15-minute sleep due to download failure");
     } else {
-        // Get sleep interval from server (with fallback to default)
         sleepInterval = getSleepDurationFromServer();
         if (sleepInterval == 0) {
             Debug("Using default sleep interval\r\n");
@@ -349,15 +310,11 @@ void setup() {
 
     Debug("Sleep interval: " + String(sleepInterval / 1000000) + " seconds (" + String(sleepInterval / 1000000 / 60) + " minutes)\r\n");
 
-    // Report going to sleep
     reportDeviceStatus("sleeping", batteryVoltage, signalStrength, batteryPercent, isCharging);
     String sleepMsg = "Entering deep sleep for " + String(sleepInterval / 1000000 / 60) + " minutes";
     sendLogToServer(sleepMsg.c_str());
 
-    // Power down radios before sleep
     teardownRadios();
-
-    // Enter deep sleep
     enterDeepSleep(sleepInterval);
 }
 
@@ -378,16 +335,23 @@ void setupPowerManagement() {
 
     // ADC config for better voltage readings
     analogReadResolution(12);
+
+#ifdef BOARD_XIAO_EE02
+    pinMode(ADC_ENABLE_PIN, OUTPUT);
+    digitalWrite(ADC_ENABLE_PIN, LOW); // Keep off until needed
+    pinMode(BATTERY_PIN, INPUT);
+#else
     analogSetPinAttenuation(BATTERY_PIN, ADC_11db);
+#endif
 }
 
 bool connectToWiFi() {
     Debug("Connecting to WiFi: " + String(WIFI_SSID) + "\r\n");
-    
+
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(true);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    
+
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 20) {
         delay(500);
@@ -395,14 +359,14 @@ bool connectToWiFi() {
         attempts++;
         esp_task_wdt_reset();
     }
-    
+
     if (WiFi.status() == WL_CONNECTED) {
         Debug("\r\nWiFi connected!\r\n");
         Debug("IP address: " + WiFi.localIP().toString() + "\r\n");
         Debug("Signal strength: " + String(WiFi.RSSI()) + " dBm\r\n");
         return true;
     }
-    
+
     Debug("\r\nWiFi connection failed!\r\n");
     return false;
 }
@@ -410,7 +374,6 @@ bool connectToWiFi() {
 bool downloadAndDisplayImage() {
     Debug("=== DOWNLOADING IMAGE FROM SERVER ===\r\n");
 
-    // Try to download to PSRAM and display immediately (using default parameters)
     if (downloadImageToPSRAM(true, nullptr)) {
         return true;
     }
@@ -422,7 +385,7 @@ bool downloadAndDisplayImage() {
     String url = buildApiUrl("current.json", SERVER_HOST);
     http.begin(url);
     http.setTimeout(60000);
-    http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
+    http.addHeader("User-Agent", "ESP32-Glance-v3/" FIRMWARE_VERSION);
 
     int httpResponseCode = http.GET();
     Debug("HTTP response: " + String(httpResponseCode) + "\r\n");
@@ -431,13 +394,12 @@ bool downloadAndDisplayImage() {
         String payload = http.getString();
         http.end();
 
-        // Parse JSON response (simplified - assuming server sends pre-processed e-ink data)
         DynamicJsonDocument doc(1024);
         DeserializationError error = deserializeJson(doc, payload);
 
         if (!error && doc.containsKey("hasImage") && doc["hasImage"]) {
             Debug("Server has image available\r\n");
-            return downloadImageToPSRAM(true, nullptr); // Try PSRAM download again with immediate display
+            return downloadImageToPSRAM(true, nullptr);
         }
     }
 
@@ -451,7 +413,6 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
     Debug("PSRAM free: " + String(ESP.getFreePsram()) + " bytes\r\n");
     Debug("Heap caps PSRAM: " + String(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)) + " bytes\r\n");
 
-    // Use streaming approach: only allocate e-ink output buffer (960KB)
     const int EINK_BUFFER_SIZE = IMAGE_BUFFER_SIZE; // 960KB
     const int CHUNK_SIZE = 4096; // 4KB chunks for streaming
 
@@ -488,7 +449,7 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
     String url = buildApiUrl("image.bin", serverToUse);
     http.begin(url);
     http.setTimeout(60000);
-    http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
+    http.addHeader("User-Agent", "ESP32-Glance-v3/" FIRMWARE_VERSION);
 
     int httpCode = http.GET();
     Debug("Image download response: " + String(httpCode) + "\r\n");
@@ -503,7 +464,7 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
         url = buildApiUrl("image.bin", serverToUse);
         http.begin(url);
         http.setTimeout(60000);
-        http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
+        http.addHeader("User-Agent", "ESP32-Glance-v3/" FIRMWARE_VERSION);
         httpCode = http.GET();
         Debug("Production server response: " + String(httpCode) + "\r\n");
     }
@@ -520,7 +481,7 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
         http.end();
         return false;
     }
-    
+
     int contentLength = http.getSize();
     Debug("Content length: " + String(contentLength) + " bytes\r\n");
 
@@ -533,7 +494,7 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
     } else {
         Debug("Detected RGB stream. Allocating RGB chunk buffer...\r\n");
         sendLogToServer("Downloading and converting RGB stream");
-        
+
         rgbChunk = (uint8_t*)malloc(CHUNK_SIZE);
         if (!rgbChunk) {
             Debug("ERROR: Cannot allocate RGB chunk buffer!\r\n");
@@ -547,50 +508,46 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
             return false;
         }
     }
-    
+
     // Stream data
     WiFiClient* stream = http.getStreamPtr();
     int totalBytesRead = 0;
     int pixelIndex = 0;
-    
+
     // Clear e-ink buffer
     memset(einkBuffer, 0, EINK_BUFFER_SIZE);
-    
+
     while (http.connected() && (totalBytesRead < contentLength || contentLength == -1)) {
         size_t available = stream->available();
         if (available > 0) {
             if (isPackedBinary) {
-                // DIRECT DOWNLOAD: Read bytes directly into einkBuffer
                 int remaining = EINK_BUFFER_SIZE - totalBytesRead;
                 int readSize = min((int)available, remaining);
-                
+
                 if (readSize > 0) {
                     int bytesRead = stream->readBytes(einkBuffer + totalBytesRead, readSize);
                     totalBytesRead += bytesRead;
                 } else {
-                    // Buffer full
                     break;
                 }
             } else {
-                // RGB CONVERSION: Read into chunk, convert, write to einkBuffer
                 int readSize = min((int)available, CHUNK_SIZE);
                 readSize = (readSize / 3) * 3; // Align to RGB triplets
-                if (readSize < 3) readSize = 3; 
-                
+                if (readSize < 3) readSize = 3;
+
                 int bytesRead = stream->readBytes(rgbChunk, readSize);
                 totalBytesRead += bytesRead;
-                
-                // Process RGB triplets
+
                 for (int i = 0; i < bytesRead && pixelIndex < (DISPLAY_WIDTH * DISPLAY_HEIGHT); i += 3) {
                     if (i + 2 < bytesRead) {
                         uint8_t r = rgbChunk[i];
                         uint8_t g = rgbChunk[i + 1];
                         uint8_t b = rgbChunk[i + 2];
                         uint8_t einkColor = mapRGBToEink(r, g, b);
-                        
+
                         int einkByteIndex = pixelIndex / 2;
                         bool isEvenPixel = (pixelIndex % 2) == 0;
-                        
+
                         if (isEvenPixel) {
                             einkBuffer[einkByteIndex] = (einkColor << 4);
                         } else {
@@ -600,8 +557,7 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
                     }
                 }
             }
-            
-            // Progress indicator
+
             if (totalBytesRead % 200000 == 0) {
                 Debug("Streamed: " + String(totalBytesRead / 1024) + "KB\r\n");
                 esp_task_wdt_reset();
@@ -611,19 +567,16 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
         }
         esp_task_wdt_reset();
     }
-    
+
     http.end();
     Debug("Download complete. Total read: " + String(totalBytesRead) + " bytes\r\n");
-    
-    // Validate download
+
     bool success = false;
     if (isPackedBinary) {
-        // For packed binary, we expect exactly 960KB
         if (totalBytesRead >= EINK_BUFFER_SIZE) {
             success = true;
         }
     } else {
-        // For RGB, we check pixel count
         if (pixelIndex >= (DISPLAY_WIDTH * DISPLAY_HEIGHT * 0.9)) {
             success = true;
         }
@@ -631,7 +584,6 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
 
     if (!success) {
         Debug("ERROR: Incomplete download\r\n");
-        // Cleanup on failure
         if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
             heap_caps_free(einkBuffer);
         } else {
@@ -641,9 +593,7 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
         return false;
     }
 
-    // Download successful
     if (displayNow) {
-        // Display immediately and cleanup
         Debug("Displaying image...\r\n");
         sendLogToServer("Rendering image to display (30-45s)");
 
@@ -654,18 +604,15 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
         Debug("SUCCESS: Image displayed!\r\n");
         sendLogToServer("Image successfully displayed");
 
-        // Cleanup
         if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
             heap_caps_free(einkBuffer);
         } else {
             free(einkBuffer);
         }
     } else if (outBuffer != nullptr) {
-        // Return buffer to caller for later display
         *outBuffer = einkBuffer;
         Debug("Image downloaded to buffer, not displaying yet\r\n");
     } else {
-        // No display and no output buffer requested - cleanup
         if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
             heap_caps_free(einkBuffer);
         } else {
@@ -680,11 +627,8 @@ bool downloadImageToPSRAM(bool displayNow, uint8_t** outBuffer) {
 // Cleanly power down the e-paper panel and cut its power rail
 void powerDownDisplay() {
     Debug("Powering down e-Paper panel...\r\n");
-    // Put panel into deep sleep
     EPD_13IN3E_Sleep();
-    // Cut panel power rail
     DEV_Module_Exit();
-    // Ensure the power pin is driven low and held through deep sleep
     pinMode(EPD_PWR_PIN, OUTPUT);
     digitalWrite(EPD_PWR_PIN, LOW);
 }
@@ -706,12 +650,11 @@ void reportDeviceStatus(const char *status, float batteryVoltage, int signalStre
     http.begin(url);
     http.setTimeout(10000);
     http.addHeader("Content-Type", "application/json");
-    http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
+    http.addHeader("User-Agent", "ESP32-Glance-v3/" FIRMWARE_VERSION);
 
     DynamicJsonDocument doc(1024);
     doc["deviceId"] = DEVICE_ID;
 
-    // Create status object as expected by server
     JsonObject statusObj = doc.createNestedObject("status");
     statusObj["status"] = status;
     statusObj["batteryVoltage"] = batteryVoltage;
@@ -723,7 +666,7 @@ void reportDeviceStatus(const char *status, float batteryVoltage, int signalStre
     statusObj["psramFree"] = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     statusObj["uptime"] = millis();
     statusObj["bootCount"] = bootCount;
-    statusObj["usedFallback"] = usedFallback; // Report if dev server failed
+    statusObj["usedFallback"] = usedFallback;
 
     String jsonString;
     serializeJson(doc, jsonString);
@@ -746,29 +689,65 @@ void sendLogToServer(const char *message, const char *level) {
     http.begin(url);
     http.setTimeout(5000);
     http.addHeader("Content-Type", "application/json");
-    http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
-    
+    http.addHeader("User-Agent", "ESP32-Glance-v3/" FIRMWARE_VERSION);
+
     DynamicJsonDocument doc(1024);
     doc["deviceId"] = DEVICE_ID;
     doc["logs"] = message;
     doc["logLevel"] = level;
     doc["deviceTime"] = millis();
-    
+
     String jsonString;
     serializeJson(doc, jsonString);
-    
+
     int httpCode = http.POST(jsonString);
+    http.end();
+}
+
+// Send a navigation/refresh action triggered by a button press.
+// The server uses this to update which image is "current" before the device fetches it.
+void sendActionToServer(const char *action) {
+    Debug("Sending action to server: " + String(action) + "\r\n");
+
+    HTTPClient http;
+    String url = buildApiUrl("action", SERVER_HOST);
+    http.begin(url);
+    http.setTimeout(10000);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("User-Agent", "ESP32-Glance-v3/" FIRMWARE_VERSION);
+
+    DynamicJsonDocument doc(256);
+    doc["deviceId"] = DEVICE_ID;
+    doc["action"] = action;
+
+    String jsonString;
+    serializeJson(doc, jsonString);
+
+    int httpCode = http.POST(jsonString);
+    if (httpCode > 0) {
+        Debug("Action sent: " + String(httpCode) + "\r\n");
+    } else {
+        Debug("Action send failed: " + String(httpCode) + "\r\n");
+    }
     http.end();
 }
 
 float readBatteryVoltage() {
 #ifdef BOARD_GOODDISPLAY_ESP32_133C02
-    // Good Display board doesn't have battery monitoring on A13
-    // When USB powered, return a safe voltage to bypass low battery check
+    // GoodDisplay board has no battery monitoring
     return 4.2f; // Simulate full battery voltage
+#elif defined(BOARD_XIAO_EE02)
+    // Enable ADC, wait for settling, read, then disable
+    digitalWrite(ADC_ENABLE_PIN, HIGH);
+    delay(10); // Recommended settling time per EE04 datasheet
+    int adcValue = analogRead(BATTERY_PIN);
+    digitalWrite(ADC_ENABLE_PIN, LOW);
+    // Voltage divider on EE02 scales battery voltage; formula from EE04 wiki
+    float voltage = (adcValue / 4096.0f) * 7.16f;
+    return voltage;
 #else
     int adcReading = analogRead(BATTERY_PIN);
-    // Using 12-bit ADC, 11dB attenuation (~0-3.3V), and a 2:1 divider on the board
+    // 12-bit ADC, 11dB attenuation (~0-3.3V), 2:1 divider on the board
     float voltage = (adcReading / 4095.0f) * 3.3f * 2.0f;
     return voltage;
 #endif
@@ -777,26 +756,20 @@ float readBatteryVoltage() {
 int calculateBatteryPercentage(float voltage) {
     // LiPo battery discharge curve approximation
     // 4.2V = 100%, 3.7V = 50%, 3.0V = 0%
-    const float V_MAX = 4.2f;  // Fully charged
-    const float V_MIN = 3.0f;  // Empty (cutoff)
-    const float V_NOMINAL = 3.7f; // Mid-point
+    const float V_MAX = 4.2f;
+    const float V_MIN = 3.0f;
+    const float V_NOMINAL = 3.7f;
 
     if (voltage >= V_MAX) return 100;
     if (voltage <= V_MIN) return 0;
 
-    // Use piecewise linear approximation
-    // Upper half (4.2V-3.7V): 100%-50%
-    // Lower half (3.7V-3.0V): 50%-0%
     int percent;
     if (voltage >= V_NOMINAL) {
-        // Upper half: 50% to 100%
         percent = 50 + (int)((voltage - V_NOMINAL) / (V_MAX - V_NOMINAL) * 50.0f);
     } else {
-        // Lower half: 0% to 50%
         percent = (int)((voltage - V_MIN) / (V_NOMINAL - V_MIN) * 50.0f);
     }
 
-    // Clamp to 0-100 range
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
 
@@ -804,13 +777,9 @@ int calculateBatteryPercentage(float voltage) {
 }
 
 bool detectCharging(float currentVoltage, float previousVoltage) {
-    // If this is the first boot (previousVoltage == 0), can't detect charging
     if (previousVoltage < 0.1f) {
         return false;
     }
-
-    // Charging detected if voltage increased by more than 50mV
-    // This threshold avoids false positives from measurement noise
     const float CHARGING_THRESHOLD = 0.05f; // 50mV
     return (currentVoltage - previousVoltage) > CHARGING_THRESHOLD;
 }
@@ -822,7 +791,7 @@ uint64_t getSleepDurationFromServer() {
     String url = buildApiUrl("current.json", SERVER_HOST);
     http.begin(url);
     http.setTimeout(10000);
-    http.addHeader("User-Agent", "ESP32-Glance-v2/" FIRMWARE_VERSION);
+    http.addHeader("User-Agent", "ESP32-Glance-v3/" FIRMWARE_VERSION);
 
     int httpCode = http.GET();
 
@@ -830,7 +799,6 @@ uint64_t getSleepDurationFromServer() {
         String payload = http.getString();
         http.end();
 
-        // Parse JSON to get sleepDuration
         DynamicJsonDocument doc(2048);
         DeserializationError error = deserializeJson(doc, payload);
 
@@ -846,7 +814,7 @@ uint64_t getSleepDurationFromServer() {
     }
 
     http.end();
-    return 0; // Return 0 to indicate failure, caller will use default
+    return 0; // Caller will use default
 }
 
 // Helper function to build API URL
@@ -857,25 +825,33 @@ String buildApiUrl(const char* endpoint, const String& serverHost) {
 void enterDeepSleep(uint64_t sleepTime) {
     Debug("Entering deep sleep for " + String(sleepTime / 1000000) + " seconds\r\n");
 
-    // Hold display power rail off during deep sleep to prevent leakage
+    // Hold display power rail off during deep sleep to prevent leakage current
+#ifdef BOARD_XIAO_EE02
+    // GPIO43 is not an RTC GPIO on ESP32-S3, use digital pad hold instead
+    digitalWrite(EPD_PWR_PIN, LOW);
+    gpio_hold_en((gpio_num_t)EPD_PWR_PIN);
+    gpio_deep_sleep_hold_en();
+
+    // Enable ext1 wakeup on buttons (active-low: wake when any button pin goes LOW)
+    esp_sleep_enable_ext1_wakeup(BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
+
+    // Enable internal RTC pullups for button pins during deep sleep
+    // (GPIO2, GPIO3, GPIO5 are all within the RTC GPIO range on ESP32-S3)
+    rtc_gpio_pullup_en(GPIO_NUM_2);
+    rtc_gpio_pulldown_dis(GPIO_NUM_2);
+    rtc_gpio_pullup_en(GPIO_NUM_3);
+    rtc_gpio_pulldown_dis(GPIO_NUM_3);
+    rtc_gpio_pullup_en(GPIO_NUM_5);
+    rtc_gpio_pulldown_dis(GPIO_NUM_5);
+#else
+    // GoodDisplay board: EPD_PWR_PIN is GPIO45 — attempt RTC hold
     rtc_gpio_init((gpio_num_t)EPD_PWR_PIN);
     rtc_gpio_set_direction((gpio_num_t)EPD_PWR_PIN, RTC_GPIO_MODE_OUTPUT_ONLY);
     rtc_gpio_set_level((gpio_num_t)EPD_PWR_PIN, 0);
     rtc_gpio_hold_en((gpio_num_t)EPD_PWR_PIN);
+#endif
 
-    // Powerbank keep-alive: Wake periodically to draw current
-    // This prevents powerbank from shutting off during long sleep periods
-
-    // Initialize sleep cycle tracking
-    remainingSleepUs = sleepTime;
-    isInDeepSleepCycle = true;
-
-    // Sleep for either LIGHT_WAKE_INTERVAL or remaining time, whichever is shorter
-    uint64_t actualSleepTime = min(LIGHT_WAKE_INTERVAL, sleepTime);
-    Debug("First sleep segment: " + String(actualSleepTime / 1000000) + " seconds\r\n");
-    Debug("Powerbank keep-alive: will wake every " + String(LIGHT_WAKE_INTERVAL_SECONDS) + "s until " + String(sleepTime / 1000000) + "s elapsed\r\n");
-
-    esp_sleep_enable_timer_wakeup(actualSleepTime);
+    esp_sleep_enable_timer_wakeup(sleepTime);
     esp_deep_sleep_start();
 }
 
@@ -885,7 +861,6 @@ void enterDeepSleep(uint64_t sleepTime) {
 #endif
 
 // Theoretical palette - what firmware expects
-// These are the standard RGB values the e-paper firmware recognizes
 struct SpectraColor { uint8_t r, g, b, idx; };
 static const SpectraColor SPECTRA6_PALETTE_THEORETICAL[] = {
     { 0,   0,   0,   0x0 }, // Black
@@ -897,45 +872,30 @@ static const SpectraColor SPECTRA6_PALETTE_THEORETICAL[] = {
 };
 
 // Measured palette - actual colors displayed by e-paper
-// These values are measured from the actual e-paper display and represent
-// what colors are actually shown, not what the theoretical values suggest.
-// Used for more accurate color matching when converting RGB streams.
-// Note: The server now does optimized dithering with measured palette,
-// so this is mainly used as a fallback for local RGB processing.
 static const SpectraColor SPECTRA6_PALETTE_MEASURED[] = {
-    { 2,   2,   2,   0x0 }, // Black - nearly perfect
-    { 190, 200, 200, 0x1 }, // White - actually light gray (30% darker!)
-    { 205, 202, 0,   0x2 }, // Yellow - darker than expected
-    { 135, 19,  0,   0x3 }, // Red - much darker (54% reduction)
-    { 5,   64,  158, 0x5 }, // Blue - much darker (58% reduction)
-    { 39,  102, 60,  0x6 }  // Green - extremely dark (73-87% reduction)
+    { 2,   2,   2,   0x0 }, // Black
+    { 190, 200, 200, 0x1 }, // White (actually light gray)
+    { 205, 202, 0,   0x2 }, // Yellow (darker than expected)
+    { 135, 19,  0,   0x3 }, // Red (much darker)
+    { 5,   64,  158, 0x5 }, // Blue (much darker)
+    { 39,  102, 60,  0x6 }  // Green (extremely dark)
 };
 
-// Direct color mapping for server-dithered images
-// Classify incoming 24-bit pixel to closest Spectra-6 palette index.
-//
-// IMPORTANT: This function now uses the MEASURED palette for better accuracy.
-// The server sends pre-dithered images using theoretical colors, so if we
-// receive theoretical colors, we should match them exactly. If we receive
-// other RGB values, we use measured palette for better color matching.
 uint8_t mapRGBToEink(uint8_t r, uint8_t g, uint8_t b) {
-    // Optionally swap to handle BGR streams
 #if COLOR_ORDER_BGR
     uint8_t rr = b; uint8_t gg = g; uint8_t bb = r;
 #else
     uint8_t rr = r; uint8_t gg = g; uint8_t bb = b;
 #endif
 
-    // Fast-path: Check for exact matches with theoretical palette first
-    // (server-dithered images use theoretical colors)
+    // Fast-path: exact match against theoretical palette (server-dithered images)
     for (const auto &pc : SPECTRA6_PALETTE_THEORETICAL) {
         if (rr == pc.r && gg == pc.g && bb == pc.b) {
             return pc.idx;
         }
     }
 
-    // If not an exact match, use measured palette for better color matching
-    // This accounts for what the display actually shows
+    // Fallback: nearest neighbour against measured palette
     uint32_t bestDist = UINT32_MAX;
     uint8_t bestIdx = EINK_WHITE;
     for (const auto &pc : SPECTRA6_PALETTE_MEASURED) {

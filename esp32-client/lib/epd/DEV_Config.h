@@ -59,6 +59,17 @@
 // Additional QSPI data pins for quad mode
 #define EPD_DATA2_PIN   39    // QSPI Data2
 #define EPD_DATA3_PIN   38    // QSPI Data3
+#elif defined(BOARD_XIAO_EE02)
+// XIAO ePaper Display Board EE02 (XIAO ESP32-S3, standard SPI)
+// Pin mapping from EPaper_Board_Pins_Setups.h Setup510
+#define EPD_SCK_PIN     7     // D8 (GPIO7)
+#define EPD_MOSI_PIN    9     // D10 (GPIO9)
+#define EPD_CS_M_PIN    44    // GPIO44 (D7/RX, drives left half)
+#define EPD_CS_S_PIN    41    // GPIO41 (internal, drives right half)
+#define EPD_RST_PIN     38    // GPIO38 (internal)
+#define EPD_DC_PIN      10    // GPIO10 (internal)
+#define EPD_BUSY_PIN    4     // D3/A3 (GPIO4)
+#define EPD_PWR_PIN     43    // GPIO43 (D6/TX), display power enable
 #else
 // ESP32 Feather v2 to 13.3" E6 HAT+ Display (Standard SPI)
 #define EPD_SCK_PIN     5     // SPI Clock (CLK)
