@@ -28,8 +28,8 @@
 #ifdef BOARD_XIAO_EE02
 #define BATTERY_PIN     1   // GPIO1 (A0) - battery voltage ADC
 #define ADC_ENABLE_PIN  6   // GPIO6 (A5) - must be HIGH to enable ADC
-#define BUTTON_KEY0     2   // GPIO2 - refresh (active-low)
-#define BUTTON_KEY1     3   // GPIO3 - previous (active-low)
+#define BUTTON_KEY0     2   // GPIO2 - previous (active-low)
+#define BUTTON_KEY1     3   // GPIO3 - refresh (active-low)
 #define BUTTON_KEY2     5   // GPIO5 - next (active-low)
 #define BUTTON_WAKE_MASK ((1ULL << BUTTON_KEY0) | (1ULL << BUTTON_KEY1) | (1ULL << BUTTON_KEY2))
 #else
@@ -58,6 +58,8 @@ void enterDeepSleep(uint64_t sleepTime);
 uint8_t mapRGBToEink(uint8_t r, uint8_t g, uint8_t b);
 uint64_t getSleepDurationFromServer();
 String buildApiUrl(const char* endpoint, const String& serverHost);
+void setEinkPixel(uint8_t* buffer, int x, int y, uint8_t color);
+void drawBatteryLowIcon(uint8_t* buffer);
 
 // E-ink color palette
 const uint8_t EINK_BLACK = 0x0;
@@ -91,8 +93,8 @@ void setup() {
 #ifdef BOARD_XIAO_EE02
     if (buttonWake) {
         uint64_t wakeStatus = esp_sleep_get_ext1_wakeup_status();
-        if (wakeStatus & (1ULL << BUTTON_KEY0))      wakeButton = 0; // refresh
-        else if (wakeStatus & (1ULL << BUTTON_KEY1)) wakeButton = 1; // previous
+        if (wakeStatus & (1ULL << BUTTON_KEY0))      wakeButton = 0; // previous
+        else if (wakeStatus & (1ULL << BUTTON_KEY1)) wakeButton = 1; // refresh
         else if (wakeStatus & (1ULL << BUTTON_KEY2)) wakeButton = 2; // next
         Debug("Button wake: KEY" + String(wakeButton) + "\r\n");
     }
@@ -135,11 +137,10 @@ void setup() {
     // Store current voltage for next wake cycle
     lastBatteryVoltage = batteryVoltage;
 
-    if (batteryVoltage < LOW_BATTERY_THRESHOLD) {
-        Debug("Low battery detected, entering extended sleep\r\n");
-        sendLogToServer("Low battery detected, entering extended sleep", "WARNING");
-        enterDeepSleep(DEFAULT_SLEEP_TIME * 2); // Double sleep time for low battery
-        return;
+    bool lowBattery = (batteryVoltage < LOW_BATTERY_THRESHOLD);
+    if (lowBattery) {
+        Debug("Low battery detected, will display with warning icon\r\n");
+        sendLogToServer("Low battery detected, displaying with warning icon", "WARNING");
     }
 
     // Connect to WiFi
@@ -160,7 +161,7 @@ void setup() {
     // If woken by a button, send the action to the server before fetching the image.
     // The server will update which image is "current" based on the action.
     if (buttonWake && wakeButton >= 0) {
-        const char* actions[] = {"refresh", "previous", "next"};
+        const char* actions[] = {"previous", "refresh", "next"};
         sendActionToServer(actions[wakeButton]);
     } else {
         sendLogToServer("Timer wake, checking for new image");
@@ -252,17 +253,24 @@ void setup() {
             EPD_13IN3E_Init();
             delay(2000);
 
-            Debug("Clearing display...\r\n");
-            sendLogToServer("Clearing display (30-45s)");
-            EPD_13IN3E_Clear(EINK_WHITE);
-            Debug("Display cleared\r\n");
-            sendLogToServer("Display cleared, rendering new image");
-            delay(1000);
+            if (buttonWake && wakeButton == 1) {
+                Debug("Refresh requested, clearing display...\r\n");
+                sendLogToServer("Refresh requested, clearing display (30-45s)");
+                EPD_13IN3E_Clear(EINK_WHITE);
+                Debug("Display cleared\r\n");
+                sendLogToServer("Display cleared, rendering new image");
+                delay(1000);
+            }
 
             Debug("Displaying downloaded image...\r\n");
             sendLogToServer("Rendering image to display (30-45s)");
             delay(2000);
             esp_task_wdt_reset();
+
+            // Overlay battery low icon in corner if needed
+            if (lowBattery) {
+                drawBatteryLowIcon(imageBuffer);
+            }
 
             EPD_13IN3E_Display(imageBuffer);
             Debug("SUCCESS: Image displayed!\r\n");
@@ -300,6 +308,10 @@ void setup() {
         sleepInterval = 15 * 60 * 1000000ULL; // 15 minutes on download failure
         Debug("Download failed, using short sleep interval: 15 minutes\r\n");
         sendLogToServer("Using 15-minute sleep due to download failure");
+    } else if (lowBattery) {
+        sleepInterval = DEFAULT_SLEEP_TIME * 2; // Double sleep time for low battery
+        Debug("Low battery, using extended sleep interval\r\n");
+        sendLogToServer("Using extended sleep due to low battery");
     } else {
         sleepInterval = getSleepDurationFromServer();
         if (sleepInterval == 0) {
@@ -880,6 +892,49 @@ static const SpectraColor SPECTRA6_PALETTE_MEASURED[] = {
     { 5,   64,  158, 0x5 }, // Blue (much darker)
     { 39,  102, 60,  0x6 }  // Green (extremely dark)
 };
+
+void setEinkPixel(uint8_t* buffer, int x, int y, uint8_t color) {
+    if (x < 0 || x >= DISPLAY_WIDTH || y < 0 || y >= DISPLAY_HEIGHT) return;
+    int pixelIndex = y * DISPLAY_WIDTH + x;
+    int byteIndex = pixelIndex / 2;
+    if (pixelIndex % 2 == 0) {
+        buffer[byteIndex] = (buffer[byteIndex] & 0x0F) | (color << 4);
+    } else {
+        buffer[byteIndex] = (buffer[byteIndex] & 0xF0) | color;
+    }
+}
+
+// Draws a small battery-low icon in the bottom-right corner of the display buffer.
+// Battery body (26x12 px) with a partial red fill and a nub on the right.
+void drawBatteryLowIcon(uint8_t* buffer) {
+    const int BX = DISPLAY_WIDTH - 64;   // left edge of battery body
+    const int BY = DISPLAY_HEIGHT - 50;  // top edge of battery body
+    const int BW = 28;                   // battery body width (without nub)
+    const int BH = 14;                   // battery body height
+
+    // Outer outline in black
+    for (int x = BX; x < BX + BW; x++) {
+        setEinkPixel(buffer, x, BY, EINK_BLACK);
+        setEinkPixel(buffer, x, BY + BH - 1, EINK_BLACK);
+    }
+    for (int y = BY; y < BY + BH; y++) {
+        setEinkPixel(buffer, BX, y, EINK_BLACK);
+        setEinkPixel(buffer, BX + BW - 1, y, EINK_BLACK);
+    }
+
+    // Terminal nub on the right side
+    for (int y = BY + 4; y < BY + BH - 4; y++) {
+        setEinkPixel(buffer, BX + BW, y, EINK_BLACK);
+        setEinkPixel(buffer, BX + BW + 1, y, EINK_BLACK);
+    }
+
+    // Small red fill on the left to indicate low charge
+    for (int x = BX + 1; x < BX + 9; x++) {
+        for (int y = BY + 1; y < BY + BH - 1; y++) {
+            setEinkPixel(buffer, x, y, EINK_RED);
+        }
+    }
+}
 
 uint8_t mapRGBToEink(uint8_t r, uint8_t g, uint8_t b) {
 #if COLOR_ORDER_BGR

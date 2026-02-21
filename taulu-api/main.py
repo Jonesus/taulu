@@ -3,6 +3,7 @@ import json
 import datetime
 import threading
 import logging
+from io import BytesIO
 from flask import Flask, jsonify, request, Response
 from dotenv import load_dotenv
 
@@ -92,115 +93,152 @@ class DailyImageManager:
         except Exception as e:
             print(f"Error saving state: {e}")
 
+    def _fetch_and_store_image(self, slot_index):
+        """Fetch one random photo and store it in slot_index. Returns True on success."""
+        asset = immich_client.find_random_group_photo(PEOPLE_IDS)
+        if not asset:
+            print(f"No suitable asset found for slot {slot_index}.")
+            return False
+
+        image_data = immich_client.download_asset(asset['id'])
+        if not image_data:
+            print(f"Failed to download asset {asset['id']}.")
+            return False
+
+        processed_data = convert_image_to_bin(BytesIO(image_data))
+        filepath = os.path.join(READY_DIR, f"{asset['id']}.bin")
+
+        with open(filepath, 'wb') as f:
+            f.write(processed_data)
+
+        new_image = {'id': asset['id'], 'path': filepath}
+        with self.update_lock:
+            if slot_index < len(self.daily_images):
+                self.daily_images[slot_index] = new_image
+            else:
+                self.daily_images.append(new_image)
+            self.save_state()
+
+        print(f"Slot {slot_index} filled with {asset['id']}")
+        return True
+
     def _update_image(self):
-        """Internal method that performs the actual image update (runs in background thread)"""
+        """Fetch 3 fresh images from scratch (used on first boot / no images). Runs in background thread."""
         today = datetime.date.today().isoformat()
 
         try:
-            print(f"Updating images for {today}...")
+            print(f"Fetching initial 3 images for {today}...")
 
             if not immich_client:
                 print("Immich client not initialized (missing API key).")
                 return
 
-            # Update the date at the start
+            # Mark date and reset index at the start to prevent duplicate triggers
             with self.update_lock:
                 self.last_update_date = today
                 self.current_index = 0
                 self.save_state()
 
-            # Download up to 3 images, replacing them one by one
             for i in range(3):
                 print(f"Fetching image {i+1}/3...")
+                self._fetch_and_store_image(i)
 
-                # Fetch new image
-                asset = immich_client.find_random_group_photo(PEOPLE_IDS)
-                if not asset:
-                    print(f"No suitable asset found for image {i+1}.")
-                    continue
-
-                print(f"Downloading asset {asset['id']}...")
-                image_data = immich_client.download_asset(asset['id'])
-                if not image_data:
-                    print(f"Failed to download asset {asset['id']}.")
-                    continue
-
-                # Process image
-                print(f"Processing image {i+1}...")
-                from io import BytesIO
-                processed_data = convert_image_to_bin(BytesIO(image_data))
-
-                # Save to file
-                filename = f"{asset['id']}.bin"
-                filepath = os.path.join(READY_DIR, filename)
-
-                with open(filepath, 'wb') as f:
-                    f.write(processed_data)
-
-                # Update state immediately after each image (thread-safe)
-                # Replace existing image at index i, or append if list is shorter
-                new_image = {
-                    'id': asset['id'],
-                    'path': filepath
-                }
-                with self.update_lock:
-                    if i < len(self.daily_images):
-                        self.daily_images[i] = new_image
-                    else:
-                        self.daily_images.append(new_image)
-                    self.save_state()
-
-                print(f"Successfully processed image {i+1}: {asset['id']}")
-
-            # Final summary
             with self.update_lock:
-                image_count = len(self.daily_images)
-                if image_count > 0:
-                    print(f"Successfully updated with {image_count} image(s)")
-                else:
-                    print("No images were successfully downloaded.")
+                print(f"Initial fetch done: {len(self.daily_images)} image(s) available")
 
         except Exception as e:
-            print(f"Error processing images: {e}")
+            print(f"Error fetching images: {e}")
+        finally:
+            with self.update_lock:
+                self.updating = False
+
+    def _fetch_image_for_slot(self, slot_index):
+        """Fetch one new image and replace the given slot. Runs in background thread."""
+        try:
+            if not immich_client:
+                return
+
+            print(f"Fetching new image for slot {slot_index}...")
+            self._fetch_and_store_image(slot_index)
+
+        except Exception as e:
+            print(f"Error fetching image for slot {slot_index}: {e}")
         finally:
             with self.update_lock:
                 self.updating = False
 
     def ensure_daily_image(self):
-        """Trigger daily image update if needed (non-blocking)"""
+        """Trigger image fetch if needed (non-blocking).
+
+        - No images at all: fetch 3 fresh images.
+        - Day changed: replace only the last slot (rolling window).
+        - Same day with images: no-op.
+        """
         today = datetime.date.today().isoformat()
 
-        # Check if we already have today's images
         with self.update_lock:
-            if self.last_update_date == today and len(self.daily_images) > 0:
-                return # We are good for today
+            has_images = len(self.daily_images) > 0
 
-            # Check if an update is already in progress
             if self.updating:
-                return # Update already running
+                return
 
-            # Mark as updating and start background thread
+            if not has_images:
+                # First boot or state wiped — fetch 3 from scratch
+                self.updating = True
+                thread = threading.Thread(target=self._update_image, daemon=True)
+                thread.start()
+                print("Started initial image fetch (3 images)...")
+                return
+
+            if self.last_update_date == today:
+                return  # Already up to date
+
+            # Day changed — replace only the last slot
             self.updating = True
-
-        # Start background update
-        thread = threading.Thread(target=self._update_image, daemon=True)
-        thread.start()
-        print("Started background image update...")
-
-    def get_next_image(self):
-        """Get the next image in rotation and advance the index"""
-        with self.update_lock:
-            if len(self.daily_images) == 0:
-                return None
-
-            # Get current image
-            image = self.daily_images[self.current_index]
-
-            # Advance to next image (circular)
-            self.current_index = (self.current_index + 1) % len(self.daily_images)
+            self.last_update_date = today
             self.save_state()
+            slot = len(self.daily_images) - 1
 
-            return image
+        thread = threading.Thread(target=self._fetch_image_for_slot, args=(slot,), daemon=True)
+        thread.start()
+        print(f"Day changed, refreshing slot {slot}...")
+
+    def handle_action(self, action):
+        """Handle a navigation action from the device.
+
+        - 'next': advance current_index, then replace the vacated slot with a fresh image.
+        - 'previous': step back current_index (no fetch).
+        - 'refresh': no-op (device re-renders the current image).
+        """
+        slot_to_replace = None
+
+        with self.update_lock:
+            if not self.daily_images:
+                return
+
+            if action == 'next':
+                old_index = self.current_index
+                self.current_index = (self.current_index + 1) % len(self.daily_images)
+                self.save_state()
+                slot_to_replace = old_index  # Roll in a fresh image for the slot we left
+            elif action == 'previous':
+                self.current_index = (self.current_index - 1) % len(self.daily_images)
+                self.save_state()
+            # 'refresh' intentionally does nothing here
+
+            if slot_to_replace is not None and not self.updating:
+                self.updating = True
+            else:
+                slot_to_replace = None  # Already updating or no replacement needed
+
+        if slot_to_replace is not None:
+            thread = threading.Thread(
+                target=self._fetch_image_for_slot,
+                args=(slot_to_replace,),
+                daemon=True
+            )
+            thread.start()
+            print(f"Rolling window: fetching fresh image for slot {slot_to_replace}...")
 
 manager = DailyImageManager()
 manager.ensure_daily_image()
@@ -288,12 +326,16 @@ def get_image():
     # Trigger update check (non-blocking)
     manager.ensure_daily_image()
 
-    # Get the next image in rotation
-    image = manager.get_next_image()
+    # Serve the current image — index is managed by /api/action
+    with manager.update_lock:
+        if not manager.daily_images:
+            logger.warning(f"No image available for {request.remote_addr}")
+            return "No image ready", 404
+        image = manager.daily_images[manager.current_index]
 
-    if not image or not os.path.exists(image['path']):
-        logger.warning(f"No image available for {request.remote_addr}")
-        return "No image ready", 404
+    if not os.path.exists(image['path']):
+        logger.warning(f"Image file not found: {image['path']}")
+        return "Image file not found", 404
 
     logger.info(f"Serving image {image['id']} ({os.path.getsize(image['path'])} bytes)")
 
@@ -301,6 +343,15 @@ def get_image():
         data = f.read()
 
     return Response(data, mimetype='application/octet-stream')
+
+@app.route('/api/action', methods=['POST'])
+def action():
+    data = request.json or {}
+    act = data.get('action', '')
+    device_id = data.get('deviceId', 'unknown')
+    logger.info(f"POST /api/action from {request.remote_addr} - {device_id}: {act}")
+    manager.handle_action(act)
+    return jsonify({"status": "ok"})
 
 @app.route('/api/device-status', methods=['POST'])
 def device_status():
