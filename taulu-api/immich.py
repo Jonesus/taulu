@@ -77,22 +77,33 @@ class ImmichClient:
             print(f"Error downloading asset {asset_id}: {e}")
             return None
 
-    def find_random_group_photo(self, person_ids: List[str]) -> Optional[dict]:
+    def find_random_group_photo(self, person_ids: List[str], exclude_ids=None) -> Optional[dict]:
         """
         Finds a random photo containing ALL the specified people.
+        exclude_ids: set of asset IDs to skip (already shown). Returns None if all candidates
+        are excluded, signalling the caller to reset and retry without exclusions.
         """
         # 1. Search (likely returns assets with ANY of the people)
         candidates = self.search_assets(person_ids)
         if not candidates:
             print("No candidates found via search.")
             return None
-            
+
         if not isinstance(candidates, list):
             print(f"Unexpected response type from search: {type(candidates)}")
             return None
 
+        # Filter out already-shown IDs before picking
+        if exclude_ids:
+            unshown = [c for c in candidates if c['id'] not in exclude_ids]
+            if not unshown:
+                print(f"All {len(candidates)} candidates already shown.")
+                return None
+            print(f"Filtered to {len(unshown)}/{len(candidates)} unshown candidates.")
+            candidates = unshown
+
         print(f"Found {len(candidates)} candidates. Filtering...")
-        
+
         # Shuffle to get random order
         random.shuffle(candidates)
         

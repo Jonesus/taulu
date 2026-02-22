@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 WIDTH = 1200
 HEIGHT = 1600
-READY_DIR = os.path.join(os.path.dirname(__file__), 'ready')
-STATE_FILE = os.path.join(os.path.dirname(__file__), 'state.json')
+READY_DIR = os.path.join(os.path.dirname(__file__), 'state')
+STATE_FILE = os.path.join(os.path.dirname(__file__), 'state', 'state.json')
 PEOPLE_IDS_FILE = os.path.join(os.path.dirname(__file__), 'people-ids.json')
 
 SLEEP_MINUTES = os.getenv("SLEEP_MINUTES")
@@ -59,6 +59,7 @@ class ImageManager:
         self.current_index = 0
         self.last_date = None
         self.fetching = set()             # slot indices (int or 'next_daily') being fetched
+        self.shown_ids = set()            # asset IDs that have been served via /api/image.bin
         self.lock = threading.Lock()
         self._load_state()
 
@@ -77,6 +78,7 @@ class ImageManager:
             self.next_daily = nd if nd and os.path.exists(nd.get('path', '')) else None
             self.current_index = state.get('currentIndex', 0) % NUM_SLOTS
             self.last_date = state.get('lastDate')
+            self.shown_ids = set(state.get('shownIds', []))
         except Exception as e:
             logger.error(f"Error loading state: {e}")
 
@@ -88,6 +90,7 @@ class ImageManager:
                     'nextDaily': self.next_daily,
                     'currentIndex': self.current_index,
                     'lastDate': self.last_date,
+                    'shownIds': list(self.shown_ids),
                 }, f)
         except Exception as e:
             logger.error(f"Error saving state: {e}")
@@ -98,7 +101,16 @@ class ImageManager:
             if not immich_client:
                 logger.warning("Immich client not configured")
                 return
-            asset = immich_client.find_random_group_photo(PEOPLE_IDS)
+            with self.lock:
+                exclude = set(self.shown_ids)
+            asset = immich_client.find_random_group_photo(PEOPLE_IDS, exclude_ids=exclude)
+            if asset is None and exclude:
+                # All known candidates have been shown — reset history and try again
+                logger.info(f"All {len(exclude)} shown candidates exhausted, resetting history")
+                with self.lock:
+                    self.shown_ids.clear()
+                    self._save_state()
+                asset = immich_client.find_random_group_photo(PEOPLE_IDS)
             if not asset:
                 logger.warning(f"No asset found for slot {slot}")
                 return
@@ -246,6 +258,11 @@ def get_image():
         return "Image file not found", 404
 
     logger.info(f"Serving {image['id']} ({os.path.getsize(image['path'])} bytes)")
+    with manager.lock:
+        if image['id'] not in manager.shown_ids:
+            manager.shown_ids.add(image['id'])
+            manager._save_state()
+            logger.info(f"Marked {image['id']} as shown ({len(manager.shown_ids)} total)")
     with open(image['path'], 'rb') as f:
         return Response(f.read(), mimetype='application/octet-stream')
 
