@@ -126,11 +126,14 @@ class ImageManager:
                     self.next_daily = {'id': asset['id'], 'path': path}
                 else:
                     self.images[slot] = {'id': asset['id'], 'path': path}
-                self.fetching.discard(slot)
                 self._save_state()
             logger.info(f"Slot {slot} ready: {asset['id']}")
         except Exception as e:
             logger.error(f"Error fetching slot {slot}: {e}")
+        finally:
+            # Always release the slot so ensure_images() can retry on the next request.
+            # Without this, a transient upstream failure (e.g. Immich 404) would leave
+            # the slot pinned in `fetching` forever and silently block all recovery.
             with self.lock:
                 self.fetching.discard(slot)
 
